@@ -31,6 +31,7 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 | `--yes` / `-y` | Skip confirmation; delete everything marked. |
 | `--days N` | Staleness threshold (default `7`). |
 | `--worktree-root PATH` | Git worktree root (default `~/Projects/SongsterrPhone`). |
+| `--all` | List every folder found (stale and fresh). Deletion still targets only stale ones. |
 
 ## Install
 
@@ -73,4 +74,5 @@ xcode-clr --dry-run                 # preview
 xcode-clr --json | jq '.items[] | select(.to_be_removed)'
 xcode-clr --yes                     # non-interactive cleanup
 xcode-clr --days 30                 # only purge things older than 30d
+xcode-clr --all --dry-run           # full inventory, stale and fresh
 ```

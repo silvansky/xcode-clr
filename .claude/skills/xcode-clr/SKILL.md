@@ -33,6 +33,7 @@ To delete after the user confirms:
 ```sh
 xcode-clr --yes              # non-interactive: deletes all to_be_removed
 xcode-clr --dry-run          # preview only (human table)
+xcode-clr --all              # show every folder, not only stale (deletion still stale-only)
 xcode-clr --days 30          # raise threshold to 30 days
 xcode-clr --worktree-root ~/Projects/OtherRepo
 ```

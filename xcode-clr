@@ -215,6 +215,7 @@ def main() -> int:
     p.add_argument("--days", type=int, default=7, help="staleness threshold in days (default 7)")
     p.add_argument("--worktree-root", type=Path, default=DEFAULT_WORKTREE_ROOT,
                    help=f"git worktree root (default {DEFAULT_WORKTREE_ROOT})")
+    p.add_argument("--all", action="store_true", help="list every folder found, not only stale")
     args = p.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -228,15 +229,23 @@ def main() -> int:
         return 0
 
     stale = [e for e in entries if e.reason]
-    if not stale:
-        print("Nothing to clean.")
-        return 0
-
-    print(render_table(stale, now))
     total = sum(e.size_bytes for e in stale)
-    print(f"\n{len(stale)} folder(s), total {human_size(total)}")
 
-    if args.dry_run:
+    if args.all:
+        if not entries:
+            print("No DerivedData or worktree build folders found.")
+            return 0
+        print(render_table(entries, now))
+        print(f"\n{len(entries)} folder(s), total {human_size(sum(e.size_bytes for e in entries))} "
+              f"— {len(stale)} stale ({human_size(total)})")
+    else:
+        if not stale:
+            print("Nothing to clean.")
+            return 0
+        print(render_table(stale, now))
+        print(f"\n{len(stale)} folder(s), total {human_size(total)}")
+
+    if not stale or args.dry_run:
         return 0
 
     if not args.yes:
