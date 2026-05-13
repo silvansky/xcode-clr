@@ -1,0 +1,257 @@
+#!/usr/bin/python3
+"""xcode-clr — list & delete stale Xcode DerivedData and worktree build/ dirs."""
+from __future__ import annotations
+
+import argparse
+import json
+import plistlib
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+DERIVED_DATA = Path.home() / "Library/Developer/Xcode/DerivedData"
+DEFAULT_WORKTREE_ROOT = Path.home() / "Projects/SongsterrPhone"
+SKIP_DD_NAMES = {"ModuleCache.noindex", "SDKStatCaches.noindex", "CompilationCache.noindex"}
+
+
+@dataclass
+class Entry:
+    path: Path
+    kind: str  # "derived_data" | "worktree_build"
+    source_path: Optional[Path]
+    mtime: datetime
+    last_accessed: Optional[datetime] = None
+    size_bytes: int = 0
+    reason: Optional[str] = None
+
+    @property
+    def staleness_ts(self) -> datetime:
+        return max(self.mtime, self.last_accessed) if self.last_accessed else self.mtime
+
+    def age_days(self, now: datetime) -> float:
+        return (now - self.staleness_ts).total_seconds() / 86400.0
+
+
+def find_derived_data() -> list[Entry]:
+    if not DERIVED_DATA.is_dir():
+        return []
+    entries: list[Entry] = []
+    for child in DERIVED_DATA.iterdir():
+        if not child.is_dir() or child.name in SKIP_DD_NAMES or child.name.endswith(".noindex"):
+            continue
+        plist = child / "info.plist"
+        if not plist.is_file():
+            continue
+        try:
+            with plist.open("rb") as f:
+                data = plistlib.load(f)
+        except Exception:
+            continue
+        workspace = data.get("WorkspacePath")
+        if not workspace:
+            continue
+        last_accessed = data.get("LastAccessedDate")
+        if isinstance(last_accessed, datetime) and last_accessed.tzinfo is None:
+            last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+        mtime = datetime.fromtimestamp(child.stat().st_mtime, tz=timezone.utc)
+        entries.append(Entry(
+            path=child,
+            kind="derived_data",
+            source_path=Path(workspace),
+            mtime=mtime,
+            last_accessed=last_accessed,
+        ))
+    return entries
+
+
+def git_worktree_paths(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    paths: list[Path] = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            paths.append(Path(line[len("worktree "):]))
+    return paths
+
+
+def find_stale_builds(worktree_root: Path) -> list[Entry]:
+    entries: list[Entry] = []
+    for wt in git_worktree_paths(worktree_root):
+        build = wt / "build"
+        if not build.is_dir():
+            continue
+        mtime = datetime.fromtimestamp(build.stat().st_mtime, tz=timezone.utc)
+        entries.append(Entry(
+            path=build,
+            kind="worktree_build",
+            source_path=wt,
+            mtime=mtime,
+        ))
+    return entries
+
+
+def mark_stale(entries: list[Entry], days: int, now: datetime) -> None:
+    for e in entries:
+        if e.kind == "derived_data" and e.source_path and not e.source_path.exists():
+            e.reason = "source missing"
+            continue
+        if e.age_days(now) > days:
+            e.reason = f"stale >{days}d"
+
+
+def du_bytes(path: Path) -> int:
+    try:
+        out = subprocess.run(
+            ["du", "-sk", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError:
+        return 0
+    try:
+        return int(out.split()[0]) * 1024
+    except (ValueError, IndexError):
+        return 0
+
+
+def compute_sizes(entries: list[Entry]) -> None:
+    if not entries:
+        return
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        sizes = list(ex.map(du_bytes, [e.path for e in entries]))
+    for e, s in zip(entries, sizes):
+        e.size_bytes = s
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def truncate_mid(s: str, width: int) -> str:
+    if len(s) <= width:
+        return s
+    keep = width - 3
+    left = keep // 2
+    right = keep - left
+    return s[:left] + "..." + s[-right:]
+
+
+def render_table(entries: list[Entry], now: datetime) -> str:
+    if not entries:
+        return ""
+    rows = [("SIZE", "AGE", "REASON", "KIND", "SOURCE", "PATH")]
+    for e in entries:
+        rows.append((
+            human_size(e.size_bytes),
+            f"{e.age_days(now):.1f}d",
+            e.reason or "-",
+            e.kind,
+            truncate_mid(str(e.source_path) if e.source_path else "-", 60),
+            truncate_mid(str(e.path), 70),
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines = []
+    for r in rows:
+        lines.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)))
+    return "\n".join(lines)
+
+
+def render_json(entries: list[Entry], threshold_days: int, now: datetime) -> str:
+    def iso(dt: Optional[datetime]) -> Optional[str]:
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
+
+    items = []
+    for e in entries:
+        items.append({
+            "path": str(e.path),
+            "kind": e.kind,
+            "source_path": str(e.source_path) if e.source_path else None,
+            "size_bytes": e.size_bytes,
+            "last_accessed": iso(e.last_accessed),
+            "mtime": iso(e.mtime),
+            "age_days": round(e.age_days(now), 2),
+            "reason": e.reason,
+            "to_be_removed": e.reason is not None,
+        })
+    return json.dumps({
+        "scanned_at": iso(now),
+        "threshold_days": threshold_days,
+        "items": items,
+    }, indent=2)
+
+
+def delete_entries(entries: list[Entry]) -> int:
+    freed = 0
+    for e in entries:
+        try:
+            shutil.rmtree(e.path)
+            freed += e.size_bytes
+            print(f"  removed {e.path} ({human_size(e.size_bytes)})")
+        except Exception as ex:
+            print(f"  FAILED {e.path}: {ex}", file=sys.stderr)
+    return freed
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Delete stale Xcode DerivedData and worktree build/ dirs.")
+    p.add_argument("--dry-run", action="store_true", help="list only, never delete")
+    p.add_argument("--json", action="store_true", help="emit JSON (implies no delete)")
+    p.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
+    p.add_argument("--days", type=int, default=7, help="staleness threshold in days (default 7)")
+    p.add_argument("--worktree-root", type=Path, default=DEFAULT_WORKTREE_ROOT,
+                   help=f"git worktree root (default {DEFAULT_WORKTREE_ROOT})")
+    args = p.parse_args()
+
+    now = datetime.now(timezone.utc)
+    entries = find_derived_data() + find_stale_builds(args.worktree_root)
+    mark_stale(entries, args.days, now)
+    compute_sizes(entries)
+    entries.sort(key=lambda e: (e.reason is None, -e.size_bytes))
+
+    if args.json:
+        print(render_json(entries, args.days, now))
+        return 0
+
+    stale = [e for e in entries if e.reason]
+    if not stale:
+        print("Nothing to clean.")
+        return 0
+
+    print(render_table(stale, now))
+    total = sum(e.size_bytes for e in stale)
+    print(f"\n{len(stale)} folder(s), total {human_size(total)}")
+
+    if args.dry_run:
+        return 0
+
+    if not args.yes:
+        try:
+            ans = input(f"Delete {len(stale)} folder(s) ({human_size(total)})? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans != "y":
+            print("Aborted.")
+            return 0
+
+    freed = delete_entries(stale)
+    print(f"\nFreed {human_size(freed)}.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
