@@ -36,12 +36,18 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 
 ## Install
 
+Clone anywhere, make the script executable, then symlink it into any directory on your `PATH`:
+
 ```sh
-git clone https://github.com/silvansky/xcode-clr ~/Projects/xcode-clr
-chmod +x ~/Projects/xcode-clr/xcode-clr
-ln -s ~/Projects/xcode-clr/xcode-clr /opt/homebrew/bin/xcode-clr   # Apple Silicon
-# or: ln -s ~/Projects/xcode-clr/xcode-clr /usr/local/bin/xcode-clr   # Intel
+git clone https://github.com/silvansky/xcode-clr.git
+chmod +x xcode-clr/xcode-clr
+# pick whichever PATH dir you use:
+ln -s "$PWD/xcode-clr/xcode-clr" /opt/homebrew/bin/xcode-clr   # Apple Silicon Homebrew
+ln -s "$PWD/xcode-clr/xcode-clr" /usr/local/bin/xcode-clr      # Intel Homebrew
+ln -s "$PWD/xcode-clr/xcode-clr" "$HOME/.local/bin/xcode-clr"  # user-local
 ```
+
+Verify with `which xcode-clr && xcode-clr --dry-run`.
 
 The shebang is `/usr/bin/python3` (system Python 3.9+, stdlib only — no `pip install` needed).
 
@@ -51,11 +57,13 @@ Optional config at `~/.config/xcode-clr/config.json` (or `$XDG_CONFIG_HOME/xcode
 
 ```json
 {
-  "worktree_roots": ["~/Projects/my-ios-app", "~/work/other-repo"],
+  "worktree_roots": ["~/code/my-ios-app", "~/work/other-repo"],
   "threshold_days": 14,
   "auto_discover": true
 }
 ```
+
+Paths support `~` expansion.
 
 Environment override: `XCODE_CLR_WORKTREE_ROOTS=/path/a:/path/b` (colon-separated).
 

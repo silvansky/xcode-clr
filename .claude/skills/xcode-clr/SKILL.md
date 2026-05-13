@@ -5,18 +5,11 @@ description: Use this skill when the user wants to free disk space by cleaning X
 
 # xcode-clr — stale Xcode build artifact cleaner
 
-CLI at `xcode-clr` (or `~/Projects/xcode-clr/xcode-clr`) that lists & deletes:
+`xcode-clr` lists & deletes:
 - DerivedData folders whose source workspace is gone or untouched >7 days.
 - `build/` folders inside `git worktree list` entries untouched >7 days.
 
 Worktree roots are **auto-discovered** from DerivedData `WorkspacePath` (walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
-
-## Install (one-time)
-
-```sh
-chmod +x ~/Projects/xcode-clr/xcode-clr
-ln -s ~/Projects/xcode-clr/xcode-clr /usr/local/bin/xcode-clr
-```
 
 ## Usage from an agent
 
@@ -26,7 +19,7 @@ ln -s ~/Projects/xcode-clr/xcode-clr /usr/local/bin/xcode-clr
 xcode-clr --json
 ```
 
-Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`.
+Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`. Top-level `disk` carries `free_bytes`/`total_bytes`/`used_bytes`.
 
 To delete after the user confirms:
 
@@ -62,6 +55,6 @@ xcode-clr --days 14 --yes
 
 ## Gotchas
 
-- Shebang is `/usr/bin/python3` (system 3.9) on purpose — don't switch to `env python3` if user has homebrew 3.14.
 - `--json` and `--dry-run` never delete. `--yes` does. Always show the user the preview before invoking with `--yes`.
 - Worktree roots are auto-discovered from DerivedData. Add untracked repos via `--worktree-root`, env, or config — disable with `--no-auto`.
+- If `xcode-clr` is not on PATH, the install/setup question is out of scope for this skill — point the user at the project README.
