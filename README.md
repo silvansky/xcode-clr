@@ -51,6 +51,20 @@ Verify with `which xcode-clr && xcode-clr --dry-run`.
 
 The shebang is `/usr/bin/python3` (system Python 3.9+, stdlib only — no `pip install` needed).
 
+## Claude skill
+
+The repo ships a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill at `.claude/skills/xcode-clr/SKILL.md`. When loaded, Claude will reach for `xcode-clr` automatically on prompts like "free up disk space", "clean DerivedData", "Xcode is eating my drive". It defaults to `xcode-clr --json` for safe, structured inventory and only invokes destructive commands after you confirm.
+
+Install once, globally:
+
+```sh
+ln -s "$PWD/xcode-clr/.claude/skills/xcode-clr" "$HOME/.claude/skills/xcode-clr"
+```
+
+(or run `claude` from inside this repo — project-local `.claude/skills` is picked up automatically).
+
+Uninstall: `rm "$HOME/.claude/skills/xcode-clr"`.
+
 ## Configuration
 
 Optional config at `~/.config/xcode-clr/config.json` (or `$XDG_CONFIG_HOME/xcode-clr/config.json`):
