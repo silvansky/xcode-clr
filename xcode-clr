@@ -178,6 +178,11 @@ def render_table(entries: list[Entry], now: datetime) -> str:
     return "\n".join(lines)
 
 
+def disk_usage() -> tuple[int, int]:
+    u = shutil.disk_usage(Path.home())
+    return u.free, u.total
+
+
 def render_json(entries: list[Entry], threshold_days: int, now: datetime) -> str:
     def iso(dt: Optional[datetime]) -> Optional[str]:
         return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
@@ -195,9 +200,11 @@ def render_json(entries: list[Entry], threshold_days: int, now: datetime) -> str
             "reason": e.reason,
             "to_be_removed": e.reason is not None,
         })
+    free, total = disk_usage()
     return json.dumps({
         "scanned_at": iso(now),
         "threshold_days": threshold_days,
+        "disk": {"free_bytes": free, "total_bytes": total, "used_bytes": total - free},
         "items": items,
     }, indent=2)
 
@@ -238,19 +245,26 @@ def main() -> int:
     stale = [e for e in entries if e.reason]
     total = sum(e.size_bytes for e in stale)
 
+    free, total_disk = disk_usage()
+    disk_line = f"Disk: {human_size(free)} free of {human_size(total_disk)}"
+
     if args.all:
         if not entries:
             print("No DerivedData or worktree build folders found.")
+            print(disk_line)
             return 0
         print(render_table(entries, now))
         print(f"\n{len(entries)} folder(s), total {human_size(sum(e.size_bytes for e in entries))} "
               f"— {len(stale)} stale ({human_size(total)})")
+        print(disk_line)
     else:
         if not stale:
             print("Nothing to clean.")
+            print(disk_line)
             return 0
         print(render_table(stale, now))
         print(f"\n{len(stale)} folder(s), total {human_size(total)}")
+        print(disk_line)
 
     if not stale or args.dry_run:
         return 0
@@ -265,7 +279,8 @@ def main() -> int:
             return 0
 
     freed = delete_entries(stale)
-    print(f"\nFreed {human_size(freed)}.")
+    free_after, total_after = disk_usage()
+    print(f"\nFreed {human_size(freed)}. Disk: {human_size(free_after)} free of {human_size(total_after)}")
     return 0
 
 
