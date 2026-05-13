@@ -9,7 +9,7 @@ CLI at `xcode-clr` (or `~/Projects/xcode-clr/xcode-clr`) that lists & deletes:
 - DerivedData folders whose source workspace is gone or untouched >7 days.
 - `build/` folders inside `git worktree list` entries untouched >7 days.
 
-Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
+Worktree roots are **auto-discovered** from DerivedData `WorkspacePath` (walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
 
 ## Install (one-time)
 
@@ -35,7 +35,8 @@ xcode-clr --yes              # non-interactive: deletes all to_be_removed
 xcode-clr --dry-run          # preview only (human table)
 xcode-clr --all              # show every folder, not only stale (deletion still stale-only)
 xcode-clr --days 30          # raise threshold to 30 days
-xcode-clr --worktree-root ~/Projects/OtherRepo
+xcode-clr --worktree-root ~/work/repo-a --worktree-root ~/work/repo-b
+xcode-clr --no-auto          # only scan explicit/config roots, skip auto-discovery
 ```
 
 ## Recipes
@@ -63,4 +64,4 @@ xcode-clr --days 14 --yes
 
 - Shebang is `/usr/bin/python3` (system 3.9) on purpose — don't switch to `env python3` if user has homebrew 3.14.
 - `--json` and `--dry-run` never delete. `--yes` does. Always show the user the preview before invoking with `--yes`.
-- Worktree scan defaults to `~/Projects/SongsterrPhone`. For other repos pass `--worktree-root`.
+- Worktree roots are auto-discovered from DerivedData. Add untracked repos via `--worktree-root`, env, or config — disable with `--no-auto`.

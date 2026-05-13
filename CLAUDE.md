@@ -4,9 +4,19 @@ Single-file Python 3 CLI that finds & deletes stale Xcode DerivedData and worktr
 
 ## Architecture
 
-One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (`find_derived_data`, `find_stale_builds`), `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `delete_entries`, `main`.
+One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (`find_derived_data`, `git_worktree_paths`, `find_git_root`, `resolve_worktree_roots`, `find_stale_builds`), `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `delete_entries`, config loaders (`load_config`, `env_worktree_roots`), `main`.
 
 Keep it one file. No deps. No `pip install`.
+
+## Worktree-root resolution
+
+`resolve_worktree_roots` merges (in this order, deduped by `.resolve()`):
+1. `worktree_roots` from `~/.config/xcode-clr/config.json` (respects `XDG_CONFIG_HOME`).
+2. `XCODE_CLR_WORKTREE_ROOTS` env (colon-separated).
+3. `--worktree-root PATH` (repeatable on CLI).
+4. Auto-discovery: walk up each DerivedData `WorkspacePath`'s parents to the nearest `.git` (file or dir → handles linked worktrees). Disabled by `--no-auto` or `auto_discover: false` in config.
+
+`find_stale_builds` runs `git worktree list --porcelain` on each root and dedupes worktree paths (multiple roots can yield the same worktree).
 
 ## Conventions
 

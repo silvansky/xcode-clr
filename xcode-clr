@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 DERIVED_DATA = Path.home() / "Library/Developer/Xcode/DerivedData"
-DEFAULT_WORKTREE_ROOT = Path.home() / "Projects/SongsterrPhone"
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "xcode-clr/config.json"
 SKIP_DD_NAMES = {"ModuleCache.noindex", "SDKStatCaches.noindex", "CompilationCache.noindex"}
 
 
@@ -86,19 +87,64 @@ def git_worktree_paths(root: Path) -> list[Path]:
     return paths
 
 
-def find_stale_builds(worktree_root: Path) -> list[Entry]:
+def find_git_root(start: Path) -> Optional[Path]:
+    for p in [start, *start.parents]:
+        if (p / ".git").exists():
+            return p
+    return None
+
+
+def resolve_worktree_roots(
+    derived: list[Entry],
+    explicit: list[Path],
+    auto: bool,
+) -> list[Path]:
+    seen: set[Path] = set()
+    roots: list[Path] = []
+
+    def add(p: Path) -> None:
+        try:
+            r = p.resolve()
+        except OSError:
+            return
+        if r in seen or not r.is_dir():
+            return
+        seen.add(r)
+        roots.append(r)
+
+    for p in explicit:
+        add(p)
+    if auto:
+        for e in derived:
+            if e.source_path and e.source_path.exists():
+                gr = find_git_root(e.source_path.parent)
+                if gr:
+                    add(gr)
+    return roots
+
+
+def find_stale_builds(worktree_roots: list[Path]) -> list[Entry]:
+    seen: set[Path] = set()
     entries: list[Entry] = []
-    for wt in git_worktree_paths(worktree_root):
-        build = wt / "build"
-        if not build.is_dir():
-            continue
-        mtime = datetime.fromtimestamp(build.stat().st_mtime, tz=timezone.utc)
-        entries.append(Entry(
-            path=build,
-            kind="worktree_build",
-            source_path=wt,
-            mtime=mtime,
-        ))
+    for root in worktree_roots:
+        for wt in git_worktree_paths(root):
+            try:
+                wt_resolved = wt.resolve()
+            except OSError:
+                continue
+            if wt_resolved in seen:
+                continue
+            seen.add(wt_resolved)
+            build = wt / "build"
+            if not build.is_dir():
+                continue
+            mtime = datetime.fromtimestamp(build.stat().st_mtime, tz=timezone.utc)
+            entries.append(Entry(
+                path=build,
+                kind="worktree_build",
+                source_path=wt,
+                mtime=mtime,
+            ))
     return entries
 
 
@@ -221,19 +267,50 @@ def delete_entries(entries: list[Entry]) -> int:
     return freed
 
 
+def load_config() -> dict:
+    if not CONFIG_PATH.is_file():
+        return {}
+    try:
+        with CONFIG_PATH.open() as f:
+            return json.load(f)
+    except (OSError, ValueError) as ex:
+        print(f"warning: ignoring {CONFIG_PATH}: {ex}", file=sys.stderr)
+        return {}
+
+
+def env_worktree_roots() -> list[Path]:
+    raw = os.environ.get("XCODE_CLR_WORKTREE_ROOTS", "")
+    return [Path(p).expanduser() for p in raw.split(":") if p]
+
+
 def main() -> int:
+    cfg = load_config()
+    cfg_roots = [Path(p).expanduser() for p in cfg.get("worktree_roots", [])]
+    cfg_days = int(cfg.get("threshold_days", 7))
+    cfg_auto = bool(cfg.get("auto_discover", True))
+
     p = argparse.ArgumentParser(description="Delete stale Xcode DerivedData and worktree build/ dirs.")
     p.add_argument("--dry-run", action="store_true", help="list only, never delete")
     p.add_argument("--json", action="store_true", help="emit JSON (implies no delete)")
     p.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
-    p.add_argument("--days", type=int, default=7, help="staleness threshold in days (default 7)")
-    p.add_argument("--worktree-root", type=Path, default=DEFAULT_WORKTREE_ROOT,
-                   help=f"git worktree root (default {DEFAULT_WORKTREE_ROOT})")
+    p.add_argument("--days", type=int, default=cfg_days,
+                   help=f"staleness threshold in days (default {cfg_days})")
+    p.add_argument("--worktree-root", type=Path, action="append", default=[],
+                   metavar="PATH",
+                   help="extra git worktree root to scan; repeatable")
+    p.add_argument("--no-auto", dest="auto", action="store_false", default=cfg_auto,
+                   help="disable auto-discovery of worktree roots from DerivedData WorkspacePath")
     p.add_argument("--all", action="store_true", help="list every folder found, not only stale")
     args = p.parse_args()
 
     now = datetime.now(timezone.utc)
-    entries = find_derived_data() + find_stale_builds(args.worktree_root)
+    derived = find_derived_data()
+    roots = resolve_worktree_roots(
+        derived,
+        explicit=cfg_roots + env_worktree_roots() + args.worktree_root,
+        auto=args.auto,
+    )
+    entries = derived + find_stale_builds(roots)
     mark_stale(entries, args.days, now)
     compute_sizes(entries)
     entries.sort(key=lambda e: (e.reason is None, -e.size_bytes))
