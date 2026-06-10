@@ -23,15 +23,21 @@ SKIP_DD_NAMES = {"ModuleCache.noindex", "SDKStatCaches.noindex", "CompilationCac
 @dataclass
 class Entry:
     path: Path
-    kind: str  # "derived_data" | "worktree_build"
+    kind: str  # "derived_data" | "worktree_build" | "simulator"
     source_path: Optional[Path]
     mtime: datetime
     last_accessed: Optional[datetime] = None
     size_bytes: int = 0
     reason: Optional[str] = None
+    udid: Optional[str] = None       # simulator only
+    state: Optional[str] = None      # simulator only: Booted | Shutdown | ...
+    available: bool = True           # simulator only: runtime still installed
+    label: Optional[str] = None      # display name shown instead of source_path
 
     @property
     def staleness_ts(self) -> datetime:
+        if self.kind == "simulator":
+            return self.last_accessed or self.mtime  # last boot, else folder mtime
         return max(self.mtime, self.last_accessed) if self.last_accessed else self.mtime
 
     def age_days(self, now: datetime) -> float:
@@ -148,8 +154,81 @@ def find_stale_builds(worktree_roots: list[Path]) -> list[Entry]:
     return entries
 
 
-def mark_stale(entries: list[Entry], days: int, now: datetime) -> None:
+def parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def runtime_label(runtime_id: str) -> str:
+    tail = runtime_id.rsplit(".", 1)[-1]  # iOS-18-6
+    parts = tail.split("-")
+    return f"{parts[0]} {'.'.join(parts[1:])}" if len(parts) > 1 else tail
+
+
+def simctl_devices() -> dict:
+    try:
+        out = subprocess.run(
+            ["xcrun", "simctl", "list", "devices", "--json"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {}
+    try:
+        return json.loads(out).get("devices", {})
+    except ValueError:
+        return {}
+
+
+def find_simulators() -> list[Entry]:
+    entries: list[Entry] = []
+    for runtime_id, devices in simctl_devices().items():
+        rt = runtime_label(runtime_id)
+        for d in devices:
+            udid, data_path = d.get("udid"), d.get("dataPath")
+            if not udid or not data_path:
+                continue
+            device_dir = Path(data_path).parent
+            last_booted = parse_iso(d.get("lastBootedAt"))
+            try:
+                mtime = datetime.fromtimestamp(device_dir.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                if last_booted is None:
+                    continue
+                mtime = last_booted
+            state = d.get("state")
+            name = d.get("name") or udid
+            tags = [t for t in (rt, None if state == "Shutdown" else state) if t]
+            entries.append(Entry(
+                path=device_dir,
+                kind="simulator",
+                source_path=None,
+                mtime=mtime,
+                last_accessed=last_booted,
+                size_bytes=int(d.get("dataPathSize") or 0),
+                udid=udid,
+                state=state,
+                available=bool(d.get("isAvailable")),
+                label=f"{name} · {' · '.join(tags)}",
+            ))
+    return entries
+
+
+def mark_stale(entries: list[Entry], days: int, sim_days: int, now: datetime) -> None:
     for e in entries:
+        if e.kind == "simulator":
+            if not e.available:
+                e.reason = "runtime unavailable"
+            elif e.state != "Shutdown":
+                pass  # booted / in use — never delete
+            elif e.last_accessed is None:
+                pass  # never booted — leave default templates alone
+            elif e.age_days(now) > sim_days:
+                e.reason = f"stale >{sim_days}d"
+            continue
         if e.kind == "derived_data" and e.source_path and not e.source_path.exists():
             e.reason = "source missing"
             continue
@@ -172,11 +251,12 @@ def du_bytes(path: Path) -> int:
 
 
 def compute_sizes(entries: list[Entry]) -> None:
-    if not entries:
+    todo = [e for e in entries if not e.size_bytes]  # simulators carry dataPathSize already
+    if not todo:
         return
     with ThreadPoolExecutor(max_workers=8) as ex:
-        sizes = list(ex.map(du_bytes, [e.path for e in entries]))
-    for e, s in zip(entries, sizes):
+        sizes = list(ex.map(du_bytes, [e.path for e in todo]))
+    for e, s in zip(todo, sizes):
         e.size_bytes = s
 
 
@@ -214,7 +294,7 @@ def render_table(entries: list[Entry], now: datetime) -> str:
             f"{e.age_days(now):.1f}d",
             e.reason or "-",
             e.kind,
-            truncate_left(short_path(e.source_path), 70),
+            truncate_left(e.label or short_path(e.source_path), 70),
             truncate_left(short_path(e.path), 70),
         ))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
@@ -229,13 +309,13 @@ def disk_usage() -> tuple[int, int]:
     return u.free, u.total
 
 
-def render_json(entries: list[Entry], threshold_days: int, now: datetime) -> str:
+def render_json(entries: list[Entry], threshold_days: int, sim_threshold_days: int, now: datetime) -> str:
     def iso(dt: Optional[datetime]) -> Optional[str]:
         return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
 
     items = []
     for e in entries:
-        items.append({
+        item = {
             "path": str(e.path),
             "kind": e.kind,
             "source_path": str(e.source_path) if e.source_path else None,
@@ -245,11 +325,15 @@ def render_json(entries: list[Entry], threshold_days: int, now: datetime) -> str
             "age_days": round(e.age_days(now), 2),
             "reason": e.reason,
             "to_be_removed": e.reason is not None,
-        })
+        }
+        if e.kind == "simulator":
+            item.update(name=e.label, udid=e.udid, state=e.state, available=e.available)
+        items.append(item)
     free, total = disk_usage()
     return json.dumps({
         "scanned_at": iso(now),
         "threshold_days": threshold_days,
+        "simulator_threshold_days": sim_threshold_days,
         "disk": {"free_bytes": free, "total_bytes": total, "used_bytes": total - free},
         "items": items,
     }, indent=2)
@@ -259,11 +343,19 @@ def delete_entries(entries: list[Entry]) -> int:
     freed = 0
     for e in entries:
         try:
-            shutil.rmtree(e.path)
+            if e.kind == "simulator":
+                r = subprocess.run(
+                    ["xcrun", "simctl", "delete", e.udid],
+                    capture_output=True, text=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(r.stderr.strip() or f"simctl exit {r.returncode}")
+            else:
+                shutil.rmtree(e.path)
             freed += e.size_bytes
-            print(f"  removed {e.path} ({human_size(e.size_bytes)})")
+            print(f"  removed {e.label or e.path} ({human_size(e.size_bytes)})")
         except Exception as ex:
-            print(f"  FAILED {e.path}: {ex}", file=sys.stderr)
+            print(f"  FAILED {e.label or e.path}: {ex}", file=sys.stderr)
     return freed
 
 
@@ -288,6 +380,8 @@ def main() -> int:
     cfg_roots = [Path(p).expanduser() for p in cfg.get("worktree_roots", [])]
     cfg_days = int(cfg.get("threshold_days", 7))
     cfg_auto = bool(cfg.get("auto_discover", True))
+    cfg_sims = bool(cfg.get("scan_simulators", True))
+    cfg_sim_days = int(cfg.get("simulator_threshold_days", 14))
 
     p = argparse.ArgumentParser(description="Delete stale Xcode DerivedData and worktree build/ dirs.")
     p.add_argument("--dry-run", action="store_true", help="list only, never delete")
@@ -295,11 +389,15 @@ def main() -> int:
     p.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     p.add_argument("--days", type=int, default=cfg_days,
                    help=f"staleness threshold in days (default {cfg_days})")
+    p.add_argument("--simulator-days", type=int, default=cfg_sim_days,
+                   help=f"simulator staleness threshold in days (default {cfg_sim_days})")
     p.add_argument("--worktree-root", type=Path, action="append", default=[],
                    metavar="PATH",
                    help="extra git worktree root to scan; repeatable")
     p.add_argument("--no-auto", dest="auto", action="store_false", default=cfg_auto,
                    help="disable auto-discovery of worktree roots from DerivedData WorkspacePath")
+    p.add_argument("--no-simulators", dest="simulators", action="store_false", default=cfg_sims,
+                   help="skip scanning iOS Simulator devices")
     p.add_argument("--all", action="store_true", help="list every folder found, not only stale")
     args = p.parse_args()
 
@@ -311,12 +409,14 @@ def main() -> int:
         auto=args.auto,
     )
     entries = derived + find_stale_builds(roots)
-    mark_stale(entries, args.days, now)
+    if args.simulators:
+        entries += find_simulators()
+    mark_stale(entries, args.days, args.simulator_days, now)
     compute_sizes(entries)
     entries.sort(key=lambda e: (e.reason is None, -e.size_bytes))
 
     if args.json:
-        print(render_json(entries, args.days, now))
+        print(render_json(entries, args.days, args.simulator_days, now))
         return 0
 
     stale = [e for e in entries if e.reason]
