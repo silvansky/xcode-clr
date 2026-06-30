@@ -19,6 +19,16 @@ DERIVED_DATA = Path.home() / "Library/Developer/Xcode/DerivedData"
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "xcode-clr/config.json"
 SKIP_DD_NAMES = {"ModuleCache.noindex", "SDKStatCaches.noindex", "CompilationCache.noindex"}
 
+USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+ANSI = {"red": "31", "green": "32", "yellow": "33", "magenta": "35", "cyan": "36"}
+KIND_COLORS = {"derived_data": "cyan", "worktree_build": "green", "simulator": "magenta"}
+
+
+def color(s: str, name: Optional[str]) -> str:
+    if not USE_COLOR or not name:
+        return s
+    return f"\033[{ANSI[name]}m{s}\033[0m"
+
 
 @dataclass
 class Entry:
@@ -288,7 +298,9 @@ def render_table(entries: list[Entry], now: datetime, numbered: bool = False) ->
     if not entries:
         return ""
     header = ("SIZE", "AGE", "REASON", "KIND", "SOURCE", "PATH")
-    rows = [(("#",) + header) if numbered else header]
+    head = (("#",) + header) if numbered else header
+    rows = [head]
+    colors = [(None,) * len(head)]
     for i, e in enumerate(entries, 1):
         row = (
             human_size(e.size_bytes),
@@ -298,11 +310,13 @@ def render_table(entries: list[Entry], now: datetime, numbered: bool = False) ->
             truncate_left(e.label or short_path(e.source_path), 70),
             truncate_left(short_path(e.path), 70),
         )
+        cc = ("red", None, None, KIND_COLORS.get(e.kind), None, None)
         rows.append(((str(i),) + row) if numbered else row)
+        colors.append(((None,) + cc) if numbered else cc)
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     lines = []
-    for r in rows:
-        lines.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)))
+    for r, cc in zip(rows, colors):
+        lines.append("  ".join(color(c.ljust(widths[i]), cc[i]) for i, c in enumerate(r)))
     return "\n".join(lines)
 
 
@@ -453,8 +467,8 @@ def main() -> int:
             print(disk_line)
             return 0
         print(render_table(entries, now))
-        print(f"\n{len(entries)} folder(s), total {human_size(sum(e.size_bytes for e in entries))} "
-              f"— {len(stale)} stale ({human_size(total)})")
+        print(f"\n{len(entries)} folder(s), total {color(human_size(sum(e.size_bytes for e in entries)), 'red')} "
+              f"— {len(stale)} stale ({color(human_size(total), 'red')})")
         print(disk_line)
     else:
         if not stale:
@@ -462,7 +476,7 @@ def main() -> int:
             print(disk_line)
             return 0
         print(render_table(stale, now, numbered=interactive))
-        print(f"\n{len(stale)} folder(s), total {human_size(total)}")
+        print(f"\n{len(stale)} folder(s), total {color(human_size(total), 'red')}")
         print(disk_line)
 
     if not stale or args.dry_run:
