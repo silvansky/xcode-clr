@@ -30,7 +30,7 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 
 | Flag | Effect |
 |---|---|
-| *(none)* | Print table, prompt once, delete on `y`. |
+| *(none)* | Print numbered table, then prompt: `a`ll, `n`one, or a selection like `1,3,5-7`. |
 | `--dry-run` | Print table, never delete. |
 | `--json` | Emit JSON to stdout (all scanned items, `to_be_removed` flag). No prompts, no delete. |
 | `--yes` / `-y` | Skip confirmation; delete everything marked. |
