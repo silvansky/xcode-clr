@@ -1,6 +1,6 @@
 # xcode-clr
 
-Delete stale Xcode DerivedData, worktree `build/` directories, and long-unused iOS Simulators.
+Delete stale Xcode DerivedData, worktree `build/` directories, long-unused iOS Simulators, and purgeable caches inside shut-down simulators.
 
 Single-file Python 3 CLI. No dependencies. macOS only.
 
@@ -9,6 +9,7 @@ Single-file Python 3 CLI. No dependencies. macOS only.
 - `~/Library/Developer/Xcode/DerivedData/*` — each project folder. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
 - `build/` inside every git worktree of every project Xcode has built (auto-derived from DerivedData: `WorkspacePath` in `info.plist`, or local package paths in `SourcePackages/workspace-state.json`). Add extras with `--worktree-root`, disable auto with `--no-auto`.
 - iOS Simulator devices (`xcrun simctl list devices`) not booted in a long time. Disable with `--no-simulators`.
+- Purgeable caches inside every **shut-down** simulator: abandoned `nsurlsessiond` downloads, the `coresymbolicationd` cache, dead app containers, `tmp`, and per-app `Library/Caches` / `tmp`. Only the contents are cleared, the device and its apps stay. Disable with `--no-simulator-caches`.
 
 ## Staleness rules
 
@@ -19,8 +20,9 @@ An item is marked `to_be_removed` if **any** apply:
 - Worktree `build/` folder mtime older than 7 days → `stale >7d`.
 - Simulator last booted (`lastBootedAt`) older than 14 days → `stale >14d` (override with `--simulator-days`).
 - Simulator whose runtime is no longer installed → `runtime unavailable`.
+- Caches inside a shut-down simulator → `purgeable` (always; entries under 50 MB are hidden). The device's state is re-checked right before clearing.
 
-Simulators that are **currently booted** or were **never booted** (Xcode's default templates) are never removed.
+Simulators that are **currently booted** or were **never booted** (Xcode's default templates) are never removed, and their caches are never touched.
 
 ## Usage
 
@@ -39,6 +41,7 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 | `--worktree-root PATH` | Extra git worktree root to scan. Repeatable. |
 | `--no-auto` | Disable auto-discovery of worktree roots from DerivedData. |
 | `--no-simulators` | Skip scanning iOS Simulator devices. |
+| `--no-simulator-caches` | Skip purgeable caches inside shut-down simulators. |
 | `--all` | List every item found (stale and fresh). Deletion still targets only stale ones. |
 
 ## Install
@@ -82,7 +85,8 @@ Optional config at `~/.config/xcode-clr/config.json` (or `$XDG_CONFIG_HOME/xcode
   "threshold_days": 14,
   "auto_discover": true,
   "scan_simulators": true,
-  "simulator_threshold_days": 14
+  "simulator_threshold_days": 14,
+  "scan_simulator_caches": true
 }
 ```
 
@@ -114,7 +118,7 @@ Precedence: CLI flags > env > config file > built-in defaults. `worktree_roots` 
 }
 ```
 
-`kind` is `"derived_data"`, `"worktree_build"`, or `"simulator"`. `reason` is `null` for kept items. Simulator items add `name`, `udid`, `state`, and `available`; their `last_accessed` is the device's last boot time.
+`kind` is `"derived_data"`, `"worktree_build"`, `"simulator"`, or `"simulator_cache"`. `reason` is `null` for kept items. Simulator and simulator-cache items add `name`, `udid`, `state`, and `available`; their `last_accessed` is the device's last boot time. Simulator-cache items also list `purge_paths`, the directories whose contents get cleared.
 
 ## Examples
 
@@ -127,6 +131,7 @@ xcode-clr --all --dry-run           # full inventory, stale and fresh
 xcode-clr --worktree-root ~/work/repo-a --worktree-root ~/work/repo-b
 xcode-clr --no-auto                 # only scan explicit/config roots
 xcode-clr --no-simulators           # skip iOS Simulator devices
+xcode-clr --no-simulator-caches     # leave simulator caches alone
 xcode-clr --simulator-days 30       # only purge sims unbooted >30d
 xcode-clr --json | jq '.items[] | select(.kind=="simulator" and .to_be_removed)'
 ```

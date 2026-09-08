@@ -1,6 +1,6 @@
 ---
 name: xcode-clr
-description: Use this skill when the user wants to free disk space by cleaning Xcode build artifacts — stale DerivedData folders, orphaned `build/` directories in git worktrees, long-unused iOS Simulator devices, or any mention of "Xcode taking too much space", "clean DerivedData", "purge build cache", "delete old simulators", or running low on disk space on a Mac that runs Xcode.
+description: Use this skill when the user wants to free disk space by cleaning Xcode build artifacts — stale DerivedData folders, orphaned `build/` directories in git worktrees, long-unused iOS Simulator devices, purgeable caches inside shut-down simulators, or any mention of "Xcode taking too much space", "clean DerivedData", "purge build cache", "delete old simulators", or running low on disk space on a Mac that runs Xcode.
 ---
 
 # xcode-clr — stale Xcode build artifact cleaner
@@ -9,8 +9,9 @@ description: Use this skill when the user wants to free disk space by cleaning X
 - DerivedData folders whose source workspace is gone or untouched >7 days.
 - `build/` folders inside `git worktree list` entries untouched >7 days.
 - iOS Simulator devices not booted in >14 days (`--simulator-days`), or whose runtime is uninstalled.
+- Purgeable caches inside shut-down simulators (abandoned `nsurlsessiond` downloads, `coresymbolicationd`, dead app containers, `tmp`, per-app caches). Contents only; the device stays.
 
-Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or SwiftPM local package paths for `xcodebuild`-made folders; walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`.
+Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or SwiftPM local package paths for `xcodebuild`-made folders; walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`, and their caches with `--no-simulator-caches`.
 
 ## Usage from an agent
 
@@ -20,7 +21,7 @@ Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or Swi
 xcode-clr --json
 ```
 
-Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`|`simulator`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`. Simulator items add `name`, `udid`, `state`, `available` (and `last_accessed` is the last boot time). Top-level `disk` carries `free_bytes`/`total_bytes`/`used_bytes`.
+Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`|`simulator`|`simulator_cache`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`. Simulator and simulator-cache items add `name`, `udid`, `state`, `available` (and `last_accessed` is the last boot time); simulator-cache items also list `purge_paths`. Top-level `disk` carries `free_bytes`/`total_bytes`/`used_bytes`.
 
 To delete after the user confirms:
 
@@ -32,6 +33,7 @@ xcode-clr --days 30          # raise DerivedData/build threshold to 30 days
 xcode-clr --simulator-days 30 # raise simulator threshold (default 14) to 30 days
 xcode-clr --worktree-root ~/work/repo-a --worktree-root ~/work/repo-b
 xcode-clr --no-auto          # only scan explicit/config roots, skip auto-discovery
+xcode-clr --no-simulator-caches # leave simulator caches alone
 ```
 
 ## Recipes
@@ -66,4 +68,5 @@ xcode-clr --days 14 --yes
 - `--json` and `--dry-run` never delete. `--yes` does. Always show the user the preview before invoking with `--yes`.
 - Worktree roots are auto-discovered from DerivedData. Add untracked repos via `--worktree-root`, env, or config — disable with `--no-auto`.
 - Simulators are deleted via `xcrun simctl delete <udid>`. Currently-booted and never-booted (default template) devices are never removed; runtime-unavailable ones always are. Skip the whole scan with `--no-simulators`.
+- Simulator caches are only cleared on devices that are `Shutdown` at scan time and again at delete time; booted devices hold those files open. Clearing keeps the directories and deletes only their contents. Skip with `--no-simulator-caches`.
 - If `xcode-clr` is not on PATH, the install/setup question is out of scope for this skill — point the user at the project README.

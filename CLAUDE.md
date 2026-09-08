@@ -1,10 +1,10 @@
 # xcode-clr
 
-Single-file Python 3 CLI that finds & deletes stale Xcode DerivedData, worktree `build/` directories, and long-unused iOS Simulator devices. macOS only, stdlib only.
+Single-file Python 3 CLI that finds & deletes stale Xcode DerivedData, worktree `build/` directories, long-unused iOS Simulator devices, and purgeable caches inside shut-down simulators. macOS only, stdlib only.
 
 ## Architecture
 
-One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (DerivedData: `folder_hash`, `derived_data_hash`, `read_info_plist`, `local_package_paths`, `last_activity`, `find_derived_data`, `xcodebuild_targets`, `resolve_derived_sources`; worktrees: `git_worktree_paths`, `find_git_root`, `resolve_worktree_roots`, `list_worktrees`, `find_stale_builds`; simulators: `parse_iso`, `runtime_label`, `simctl_devices`, `find_simulators`), `source_missing`, `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `delete_entries`, config loaders (`load_config`, `env_worktree_roots`), `main`.
+One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (DerivedData: `folder_hash`, `derived_data_hash`, `read_info_plist`, `local_package_paths`, `last_activity`, `find_derived_data`, `xcodebuild_targets`, `resolve_derived_sources`; worktrees: `git_worktree_paths`, `find_git_root`, `resolve_worktree_roots`, `list_worktrees`, `find_stale_builds`; simulators: `parse_iso`, `runtime_label`, `simctl_devices`, `iter_devices`, `find_simulators`, `sim_cache_paths`, `find_simulator_caches`, `device_states`), `source_missing`, `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `clear_dir`, `delete_entries`, config loaders (`load_config`, `env_worktree_roots`), `main`.
 
 Keep it one file. No deps. No `pip install`.
 
@@ -38,7 +38,11 @@ Command-line `xcodebuild` never writes `info.plist`, so those folders carry no `
 3. `last_accessed is None` (never booted — Xcode default template, ~17 MB) → left alone.
 4. else stale if `lastBootedAt` older than `--simulator-days` (own threshold, default 14 — passed separately from `--days` into `mark_stale`).
 
-Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's registry consistent). `delete_entries` branches on `kind == "simulator"`. JSON sim items carry extra `name`, `udid`, `state`, `available` keys; top-level JSON carries `simulator_threshold_days`. Toggle scanning with `--no-simulators` / `scan_simulators` (default on).
+Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's registry consistent). `delete_entries` branches on `kind == "simulator"`. JSON sim items carry extra `name`, `udid`, `state`, `available` keys; top-level JSON carries `simulator_threshold_days`. Toggle scanning with `--no-simulators` / `scan_simulators` (default on). `simctl_devices()` is called once in `main` and shared with the cache scan.
+
+## Simulator caches
+
+`find_simulator_caches` emits one `simulator_cache` entry per device that is `Shutdown`, available, and has booted at least once. `Entry.path` is the device `data` dir; `purge_paths` are the existing dirs from `SIM_CACHE_SUBPATHS` (`Library/Caches/com.apple.nsurlsessiond/Downloads`, `Library/Caches/com.apple.coresymbolicationd`, `Library/Caches/com.apple.containermanagerd/Dead`, `tmp`) plus `SIM_CACHE_GLOBS` (per-app `Library/Caches` and `tmp`). Those three system dirs held 28 of 32.6 GB of sim caches when this was written; the rest of `Library/Caches` is deliberately left alone. Reason is always `purgeable`; `compute_sizes` `du`s `purge_paths`, then `main` drops entries under `SIM_CACHE_MIN_BYTES` (50 MB). `delete_entries` re-reads `device_states()` and refuses any device that is no longer `Shutdown`, then `clear_dir`s each purge path (contents only — apps and daemons expect the dirs to exist). Booted devices hold thousands of open handles under `Library/Caches`, never touch them. Toggle with `--no-simulator-caches` / `scan_simulator_caches` (default on).
 
 ## Adding flags
 
