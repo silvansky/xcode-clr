@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -10,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,7 @@ class Entry:
     state: Optional[str] = None      # simulator only: Booted | Shutdown | ...
     available: bool = True           # simulator only: runtime still installed
     label: Optional[str] = None      # display name shown instead of source_path
+    local_packages: list[Path] = field(default_factory=list)  # derived_data only: local SwiftPM deps
 
     @property
     def staleness_ts(self) -> datetime:
@@ -54,6 +56,64 @@ class Entry:
         return (now - self.staleness_ts).total_seconds() / 86400.0
 
 
+def folder_hash(folder: Path) -> Optional[str]:
+    h = folder.name.rsplit("-", 1)[-1]
+    return h if len(h) == 28 and h.isascii() and h.isalpha() and h.islower() else None
+
+
+def derived_data_hash(target: Path) -> str:
+    digest = hashlib.md5(str(target).encode()).digest()
+    out = ""
+    for half in (digest[:8], digest[8:]):
+        v = int.from_bytes(half, "big")
+        chars = []
+        for _ in range(14):
+            chars.append(chr(ord("a") + v % 26))
+            v //= 26
+        out += "".join(reversed(chars))
+    return out
+
+
+def read_info_plist(folder: Path) -> tuple[Optional[Path], Optional[datetime]]:
+    plist = folder / "info.plist"
+    if not plist.is_file():
+        return None, None
+    try:
+        with plist.open("rb") as f:
+            data = plistlib.load(f)
+    except Exception:
+        return None, None
+    workspace = data.get("WorkspacePath")
+    last_accessed = data.get("LastAccessedDate")
+    if not isinstance(last_accessed, datetime):
+        last_accessed = None
+    elif last_accessed.tzinfo is None:
+        last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+    return (Path(workspace) if workspace else None), last_accessed
+
+
+def local_package_paths(folder: Path) -> list[Path]:
+    state = folder / "SourcePackages/workspace-state.json"
+    try:
+        with state.open() as f:
+            deps = json.load(f)["object"]["dependencies"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    paths: list[Path] = []
+    for dep in deps:
+        loc = (dep.get("packageRef") or {}).get("location", "")
+        if isinstance(loc, str) and loc.startswith("/"):
+            paths.append(Path(loc))
+    return paths
+
+
+def last_activity(folder: Path) -> datetime:
+    ts = folder.stat().st_mtime
+    for manifest in folder.glob("Logs/*/LogStoreManifest.plist"):
+        ts = max(ts, manifest.stat().st_mtime)
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
 def find_derived_data() -> list[Entry]:
     if not DERIVED_DATA.is_dir():
         return []
@@ -61,29 +121,38 @@ def find_derived_data() -> list[Entry]:
     for child in DERIVED_DATA.iterdir():
         if not child.is_dir() or child.name in SKIP_DD_NAMES or child.name.endswith(".noindex"):
             continue
-        plist = child / "info.plist"
-        if not plist.is_file():
+        workspace, last_accessed = read_info_plist(child)
+        if workspace is None and folder_hash(child) is None:
             continue
-        try:
-            with plist.open("rb") as f:
-                data = plistlib.load(f)
-        except Exception:
-            continue
-        workspace = data.get("WorkspacePath")
-        if not workspace:
-            continue
-        last_accessed = data.get("LastAccessedDate")
-        if isinstance(last_accessed, datetime) and last_accessed.tzinfo is None:
-            last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-        mtime = datetime.fromtimestamp(child.stat().st_mtime, tz=timezone.utc)
         entries.append(Entry(
             path=child,
             kind="derived_data",
-            source_path=Path(workspace),
-            mtime=mtime,
+            source_path=workspace,
+            mtime=last_activity(child),
             last_accessed=last_accessed,
+            local_packages=local_package_paths(child),
         ))
     return entries
+
+
+def xcodebuild_targets(worktree: Path) -> list[Path]:
+    """Paths xcodebuild may have been pointed at: workspaces, projects, package dirs."""
+    try:
+        targets = [p for p in worktree.iterdir() if p.suffix in (".xcworkspace", ".xcodeproj")]
+    except OSError:
+        return []
+    for pattern in ("Package.swift", "*/Package.swift", "*/*/Package.swift"):
+        targets += [m.parent for m in worktree.glob(pattern)]
+    return targets
+
+
+def resolve_derived_sources(derived: list[Entry], worktrees: list[Path]) -> None:
+    unresolved = [e for e in derived if e.source_path is None]
+    if not unresolved:
+        return
+    by_hash = {derived_data_hash(t): t for wt in worktrees for t in xcodebuild_targets(wt)}
+    for e in unresolved:
+        e.source_path = by_hash.get(folder_hash(e.path))
 
 
 def git_worktree_paths(root: Path) -> list[Path]:
@@ -132,35 +201,38 @@ def resolve_worktree_roots(
         add(p)
     if auto:
         for e in derived:
-            if e.source_path and e.source_path.exists():
-                gr = find_git_root(e.source_path.parent)
-                if gr:
-                    add(gr)
+            hints = [e.source_path] if e.source_path else []
+            for hint in hints + e.local_packages:
+                if hint.exists():
+                    gr = find_git_root(hint)
+                    if gr:
+                        add(gr)
     return roots
 
 
-def find_stale_builds(worktree_roots: list[Path]) -> list[Entry]:
+def list_worktrees(roots: list[Path]) -> list[Path]:
     seen: set[Path] = set()
-    entries: list[Entry] = []
-    for root in worktree_roots:
+    worktrees: list[Path] = []
+    for root in roots:
         for wt in git_worktree_paths(root):
             try:
-                wt_resolved = wt.resolve()
+                key = wt.resolve()
             except OSError:
                 continue
-            if wt_resolved in seen:
-                continue
-            seen.add(wt_resolved)
-            build = wt / "build"
-            if not build.is_dir():
-                continue
-            mtime = datetime.fromtimestamp(build.stat().st_mtime, tz=timezone.utc)
-            entries.append(Entry(
-                path=build,
-                kind="worktree_build",
-                source_path=wt,
-                mtime=mtime,
-            ))
+            if key not in seen:
+                seen.add(key)
+                worktrees.append(wt)
+    return worktrees
+
+
+def find_stale_builds(worktrees: list[Path]) -> list[Entry]:
+    entries: list[Entry] = []
+    for wt in worktrees:
+        build = wt / "build"
+        if not build.is_dir():
+            continue
+        mtime = datetime.fromtimestamp(build.stat().st_mtime, tz=timezone.utc)
+        entries.append(Entry(path=build, kind="worktree_build", source_path=wt, mtime=mtime))
     return entries
 
 
@@ -227,6 +299,12 @@ def find_simulators() -> list[Entry]:
     return entries
 
 
+def source_missing(e: Entry) -> bool:
+    if e.source_path:
+        return not e.source_path.exists()
+    return bool(e.local_packages) and not any(p.exists() for p in e.local_packages)
+
+
 def mark_stale(entries: list[Entry], days: int, sim_days: int, now: datetime) -> None:
     for e in entries:
         if e.kind == "simulator":
@@ -239,7 +317,7 @@ def mark_stale(entries: list[Entry], days: int, sim_days: int, now: datetime) ->
             elif e.age_days(now) > sim_days:
                 e.reason = f"stale >{sim_days}d"
             continue
-        if e.kind == "derived_data" and e.source_path and not e.source_path.exists():
+        if e.kind == "derived_data" and source_missing(e):
             e.reason = "source missing"
             continue
         if e.age_days(now) > days:
@@ -430,7 +508,7 @@ def main() -> int:
                    metavar="PATH",
                    help="extra git worktree root to scan; repeatable")
     p.add_argument("--no-auto", dest="auto", action="store_false", default=cfg_auto,
-                   help="disable auto-discovery of worktree roots from DerivedData WorkspacePath")
+                   help="disable auto-discovery of worktree roots from DerivedData")
     p.add_argument("--no-simulators", dest="simulators", action="store_false", default=cfg_sims,
                    help="skip scanning iOS Simulator devices")
     p.add_argument("--all", action="store_true", help="list every folder found, not only stale")
@@ -443,7 +521,9 @@ def main() -> int:
         explicit=cfg_roots + env_worktree_roots() + args.worktree_root,
         auto=args.auto,
     )
-    entries = derived + find_stale_builds(roots)
+    worktrees = list_worktrees(roots)
+    resolve_derived_sources(derived, worktrees)
+    entries = derived + find_stale_builds(worktrees)
     if args.simulators:
         entries += find_simulators()
     mark_stale(entries, args.days, args.simulator_days, now)

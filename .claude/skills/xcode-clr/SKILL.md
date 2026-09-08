@@ -10,7 +10,7 @@ description: Use this skill when the user wants to free disk space by cleaning X
 - `build/` folders inside `git worktree list` entries untouched >7 days.
 - iOS Simulator devices not booted in >14 days (`--simulator-days`), or whose runtime is uninstalled.
 
-Worktree roots are **auto-discovered** from DerivedData `WorkspacePath` (walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`.
+Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or SwiftPM local package paths for `xcodebuild`-made folders; walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`.
 
 ## Usage from an agent
 

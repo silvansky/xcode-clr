@@ -7,15 +7,15 @@ Single-file Python 3 CLI. No dependencies. macOS only.
 ## What it scans
 
 - `~/Library/Developer/Xcode/DerivedData/*` — each project folder. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
-- `build/` inside every git worktree of every project Xcode has built (auto-derived from DerivedData `WorkspacePath`). Add extras with `--worktree-root`, disable auto with `--no-auto`.
+- `build/` inside every git worktree of every project Xcode has built (auto-derived from DerivedData: `WorkspacePath` in `info.plist`, or local package paths in `SourcePackages/workspace-state.json`). Add extras with `--worktree-root`, disable auto with `--no-auto`.
 - iOS Simulator devices (`xcrun simctl list devices`) not booted in a long time. Disable with `--no-simulators`.
 
 ## Staleness rules
 
 An item is marked `to_be_removed` if **any** apply:
 
-- DerivedData's `WorkspacePath` (from `info.plist`) no longer exists → `source missing`.
-- `max(LastAccessedDate, folder mtime)` is older than 7 days → `stale >7d` (override with `--days`).
+- DerivedData source no longer exists → `source missing`. Source is `WorkspacePath` from `info.plist`. Folders made by command-line `xcodebuild` have no `info.plist`, so the folder-name hash is matched against `.xcworkspace` / `.xcodeproj` / `Package.swift` paths in known worktrees; if nothing matches, `source missing` needs every local package path in `SourcePackages/workspace-state.json` to be gone.
+- `max(LastAccessedDate, folder mtime, Logs/*/LogStoreManifest.plist mtime)` is older than 7 days → `stale >7d` (override with `--days`).
 - Worktree `build/` folder mtime older than 7 days → `stale >7d`.
 - Simulator last booted (`lastBootedAt`) older than 14 days → `stale >14d` (override with `--simulator-days`).
 - Simulator whose runtime is no longer installed → `runtime unavailable`.
