@@ -36,7 +36,7 @@ Command-line `xcodebuild` never writes `info.plist`, so those folders carry no `
 1. `not available` (runtime uninstalled) → `runtime unavailable`, always removable.
 2. `state != "Shutdown"` (booted / in use) → never touched.
 3. `last_accessed is None` (never booted — Xcode default template, ~17 MB) → left alone.
-4. else stale if `lastBootedAt` older than `--simulator-days` (own threshold, default 14 — passed separately from `--days` into `mark_stale`).
+4. else stale if `lastBootedAt` older than `--simulator-days` (own threshold, default 3 — passed separately from `--days` into `mark_stale`).
 
 Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's registry consistent). `delete_entries` branches on `kind == "simulator"`. JSON sim items carry extra `name`, `udid`, `state`, `available` keys; top-level JSON carries `simulator_threshold_days`. Toggle scanning with `--no-simulators` / `scan_simulators` (default on). `simctl_devices()` is called once in `main` and shared with the cache scan.
 

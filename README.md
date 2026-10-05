@@ -16,9 +16,9 @@ Single-file Python 3 CLI. No dependencies. macOS only.
 An item is marked `to_be_removed` if **any** apply:
 
 - DerivedData source no longer exists → `source missing`. Source is `WorkspacePath` from `info.plist`. Folders made by command-line `xcodebuild` have no `info.plist`, so the folder-name hash is matched against `.xcworkspace` / `.xcodeproj` / `Package.swift` paths in known worktrees; if nothing matches, `source missing` needs every local package path in `SourcePackages/workspace-state.json` to be gone.
-- `max(LastAccessedDate, folder mtime, Logs/*/LogStoreManifest.plist mtime)` is older than 7 days → `stale >7d` (override with `--days`).
-- Worktree `build/` folder mtime older than 7 days → `stale >7d`.
-- Simulator last booted (`lastBootedAt`) older than 14 days → `stale >14d` (override with `--simulator-days`).
+- `max(LastAccessedDate, folder mtime, Logs/*/LogStoreManifest.plist mtime)` is older than 2 days → `stale >2d` (override with `--days`).
+- Worktree `build/` folder mtime older than 2 days → `stale >2d`.
+- Simulator last booted (`lastBootedAt`) older than 3 days → `stale >3d` (override with `--simulator-days`).
 - Simulator whose runtime is no longer installed → `runtime unavailable`.
 - Caches inside a shut-down simulator → `purgeable` (always; entries under 50 MB are hidden). The device's state is re-checked right before clearing.
 
@@ -36,8 +36,8 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 | `--dry-run` | Print table, never delete. |
 | `--json` | Emit JSON to stdout (all scanned items, `to_be_removed` flag). No prompts, no delete. |
 | `--yes` / `-y` | Skip confirmation; delete everything marked. |
-| `--days N` | Staleness threshold for DerivedData & worktree builds (default `7`). |
-| `--simulator-days N` | Staleness threshold for simulators (default `14`). |
+| `--days N` | Staleness threshold for DerivedData & worktree builds (default `2`). |
+| `--simulator-days N` | Staleness threshold for simulators (default `3`). |
 | `--worktree-root PATH` | Extra git worktree root to scan. Repeatable. |
 | `--no-auto` | Disable auto-discovery of worktree roots from DerivedData. |
 | `--no-simulators` | Skip scanning iOS Simulator devices. |
@@ -101,7 +101,7 @@ Precedence: CLI flags > env > config file > built-in defaults. `worktree_roots` 
 ```json
 {
   "scanned_at": "2026-05-13T08:13:09Z",
-  "threshold_days": 7,
+  "threshold_days": 2,
   "items": [
     {
       "path": "/Users/.../DerivedData/Foo-abc",
@@ -111,7 +111,7 @@ Precedence: CLI flags > env > config file > built-in defaults. `worktree_roots` 
       "last_accessed": "2026-04-13T06:55:31Z",
       "mtime": "2026-04-13T06:55:31Z",
       "age_days": 30.05,
-      "reason": "stale >7d",
+      "reason": "stale >2d",
       "to_be_removed": true
     }
   ]

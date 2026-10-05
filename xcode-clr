@@ -563,10 +563,10 @@ def env_worktree_roots() -> list[Path]:
 def main() -> int:
     cfg = load_config()
     cfg_roots = [Path(p).expanduser() for p in cfg.get("worktree_roots", [])]
-    cfg_days = int(cfg.get("threshold_days", 7))
+    cfg_days = int(cfg.get("threshold_days", 2))
     cfg_auto = bool(cfg.get("auto_discover", True))
     cfg_sims = bool(cfg.get("scan_simulators", True))
-    cfg_sim_days = int(cfg.get("simulator_threshold_days", 14))
+    cfg_sim_days = int(cfg.get("simulator_threshold_days", 3))
     cfg_sim_caches = bool(cfg.get("scan_simulator_caches", True))
 
     p = argparse.ArgumentParser(

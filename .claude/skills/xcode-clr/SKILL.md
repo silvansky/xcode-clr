@@ -6,9 +6,9 @@ description: Use this skill when the user wants to free disk space by cleaning X
 # xcode-clr — stale Xcode build artifact cleaner
 
 `xcode-clr` lists & deletes:
-- DerivedData folders whose source workspace is gone or untouched >7 days.
-- `build/` folders inside `git worktree list` entries untouched >7 days.
-- iOS Simulator devices not booted in >14 days (`--simulator-days`), or whose runtime is uninstalled.
+- DerivedData folders whose source workspace is gone or untouched >2 days.
+- `build/` folders inside `git worktree list` entries untouched >2 days.
+- iOS Simulator devices not booted in >3 days (`--simulator-days`), or whose runtime is uninstalled.
 - Purgeable caches inside shut-down simulators (abandoned `nsurlsessiond` downloads, `coresymbolicationd`, dead app containers, `tmp`, per-app caches). Contents only; the device stays.
 
 Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or SwiftPM local package paths for `xcodebuild`-made folders; walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`, and their caches with `--no-simulator-caches`.
@@ -30,7 +30,7 @@ xcode-clr --yes              # non-interactive: deletes all to_be_removed
 xcode-clr --dry-run          # preview only (human table)
 xcode-clr --all              # show every folder, not only stale (deletion still stale-only)
 xcode-clr --days 30          # raise DerivedData/build threshold to 30 days
-xcode-clr --simulator-days 30 # raise simulator threshold (default 14) to 30 days
+xcode-clr --simulator-days 30 # raise simulator threshold (default 3) to 30 days
 xcode-clr --worktree-root ~/work/repo-a --worktree-root ~/work/repo-b
 xcode-clr --no-auto          # only scan explicit/config roots, skip auto-discovery
 xcode-clr --no-simulator-caches # leave simulator caches alone
