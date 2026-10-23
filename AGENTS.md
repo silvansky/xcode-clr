@@ -42,7 +42,15 @@ Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's
 
 ## Simulator caches
 
-`find_simulator_caches` emits one `simulator_cache` entry per device that is `Shutdown`, available, and has booted at least once. `Entry.path` is the device `data` dir; `purge_paths` are the existing dirs from `SIM_CACHE_SUBPATHS` (`Library/Caches/com.apple.nsurlsessiond/Downloads`, `Library/Caches/com.apple.coresymbolicationd`, `Library/Caches/com.apple.containermanagerd/Dead`, `tmp`) plus `SIM_CACHE_GLOBS` (per-app `Library/Caches` and `tmp`). Those three system dirs held 28 of 32.6 GB of sim caches when this was written; the rest of `Library/Caches` is deliberately left alone. Reason is always `purgeable`; `compute_sizes` `du`s `purge_paths`, then `main` drops entries under `SIM_CACHE_MIN_BYTES` (50 MB). `delete_entries` re-reads `device_states()` and refuses any device that is no longer `Shutdown`, then `clear_dir`s each purge path (contents only — apps and daemons expect the dirs to exist). Booted devices hold thousands of open handles under `Library/Caches`, never touch them. Toggle with `--no-simulator-caches` / `scan_simulator_caches` (default on).
+`find_simulator_caches` emits one `simulator_cache` entry per available device that has booted at least once, including booted devices for preview. `Entry.path` is the device `data` dir; `purge_paths` are the existing dirs from `SIM_CACHE_SUBPATHS` (`Library/Caches/com.apple.nsurlsessiond/Downloads`, `Library/Caches/com.apple.coresymbolicationd`, `Library/Caches/com.apple.containermanagerd/Dead`, `tmp`) plus `SIM_CACHE_GLOBS` (per-app `Library/Caches` and `tmp`). Those three system dirs held 28 of 32.6 GB of sim caches when this was written; the rest of `Library/Caches` is deliberately left alone. Reason is `purgeable` only for `Shutdown` devices; `compute_sizes` `du`s `purge_paths`, then `main` drops entries under `SIM_CACHE_MIN_BYTES` (50 MB). `delete_entries` re-reads `device_states()` and refuses any device that is no longer `Shutdown`, then `clear_dir`s each purge path (contents only — apps and daemons expect the dirs to exist). Booted devices hold thousands of open handles under `Library/Caches`, never touch them. Toggle with `--no-simulator-caches` / `scan_simulator_caches` (default on).
+
+## Simulator WALs
+
+`find_simulator_wals` scans `Library/Finance/finance_cloud.db-wal` on available, previously booted devices. `simulator_wal` entries use the WAL as `path` and database as `source_path`; entries under 50 MB are hidden. Running devices appear in the default after-shutdown table and JSON/`--all` but only `Shutdown` entries get reason `checkpoint`. `checkpoint_wal` uses stdlib SQLite `wal_checkpoint(TRUNCATE)` with `mode=rw` and no busy wait; never unlink WALs. Recheck device state before each checkpoint. Report measured database/WAL/SHM allocation reduction; preview WAL sizes are estimates. `--no-simulator-wals` / `scan_simulator_wals` toggles scanning. `total_size` avoids counting caches/WALs twice with their simulator; deletion skips them after removing the device.
+
+## Idle shutdown
+
+`--shutdown-idle --idle-minutes N` (default 30) offers shutdown plus cache/WAL cleanup for booted devices with listed cleanup candidates. `simulator_idle_blocker` checks boot time, app-container mtime/ctime, running UIKit/container apps, and host test/build runners; failures block shutdown. This is a conservative heuristic, not measured user idle time. `shutdown_idle_simulator` rechecks activity before shutdown and requires confirmed `Shutdown`. Selection stays explicit; `--json`/`--dry-run` never shut down. Booted items keep `reason=None` and `to_be_removed=false`; `shutdown_then_clean` represents the conditional action. `requires_shutdown` and `after_shutdown_bytes` expose the preview. Cache/WAL operations recheck state individually.
 
 ## Adding flags
 
@@ -56,7 +64,7 @@ Append to `argparse` block in `main()`. Flags that suppress deletion (`--dry-run
 ./xcode-clr --days 0 --dry-run      # every entry stale
 ```
 
-No automated tests — surface area is small and side-effects are filesystem-wide. Run dry-run + json before any change to a scanner or renderer.
+Run `/usr/bin/python3 -m unittest -v` for isolated WAL tests. Run dry-run + json before any change to a scanner or renderer. Never test cleanup on real simulator data.
 
 ## Skill
 

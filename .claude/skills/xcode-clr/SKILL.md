@@ -10,6 +10,7 @@ description: Use this skill when the user wants to free disk space by cleaning X
 - `build/` folders inside `git worktree list` entries untouched >2 days.
 - iOS Simulator devices not booted in >3 days (`--simulator-days`), or whose runtime is uninstalled.
 - Purgeable caches inside shut-down simulators (abandoned `nsurlsessiond` downloads, `coresymbolicationd`, dead app containers, `tmp`, per-app caches). Contents only; the device stays.
+- Large Finance database WALs (`finance_cloud.db-wal`), checkpointed through SQLite on shut-down devices without deleting database data. Skip with `--no-simulator-wals`.
 
 Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or SwiftPM local package paths for `xcodebuild`-made folders; walks up to nearest `.git`). Extra roots via `--worktree-root PATH` (repeatable), env `XCODE_CLR_WORKTREE_ROOTS=a:b`, or `~/.config/xcode-clr/config.json`. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`). Simulators come from `xcrun simctl`; skip them with `--no-simulators`, and their caches with `--no-simulator-caches`.
 
@@ -68,5 +69,7 @@ xcode-clr --days 14 --yes
 - `--json` and `--dry-run` never delete. `--yes` does. Always show the user the preview before invoking with `--yes`.
 - Worktree roots are auto-discovered from DerivedData. Add untracked repos via `--worktree-root`, env, or config — disable with `--no-auto`.
 - Simulators are deleted via `xcrun simctl delete <udid>`. Currently-booted and never-booted (default template) devices are never removed; runtime-unavailable ones always are. Skip the whole scan with `--no-simulators`.
-- Simulator caches are only cleared on devices that are `Shutdown` at scan time and again at delete time; booted devices hold those files open. Clearing keeps the directories and deletes only their contents. Skip with `--no-simulator-caches`.
+- Simulator caches are only cleared on devices verified `Shutdown` at cleanup time; booted entries need explicit `--shutdown-idle` selection first; booted devices hold those files open. Clearing keeps the directories and deletes only their contents. Skip with `--no-simulator-caches`.
+- Booted devices' caches and WALs appear in the default table under "Available after simulator shutdown". JSON exposes `requires_shutdown`, `shutdown_then_clean`, `idle_blocker`, and top-level `after_shutdown_bytes`. Normal cleanup excludes them. `--shutdown-idle --idle-minutes N` offers conditional shutdown and cleanup after no recent app-container activity and no detected running apps/test runners (default 30 minutes). Preview with `--dry-run` or `--json`; these never shut down devices. Idle checks are heuristic, fail closed, and repeat before shutdown.
+- `simulator_wal` items expose `action: "checkpoint"`, the WAL `path`, and database `source_path`. Running devices are visible but not selected. Shut them down separately before cleanup; never unlink a WAL directly. WAL sizes estimate potential savings; checkpointing can grow the main database. Table totals deduplicate devices and their contents.
 - If `xcode-clr` is not on PATH, the install/setup question is out of scope for this skill — point the user at the project README.
