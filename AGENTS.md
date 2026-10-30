@@ -4,7 +4,7 @@ Single-file Python 3 CLI that finds & deletes stale Xcode DerivedData, worktree 
 
 ## Architecture
 
-One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (DerivedData: `folder_hash`, `derived_data_hash`, `read_info_plist`, `local_package_paths`, `last_activity`, `find_derived_data`, `xcodebuild_targets`, `resolve_derived_sources`; worktrees: `git_worktree_paths`, `find_git_root`, `resolve_worktree_roots`, `list_worktrees`, `find_stale_builds`; simulators: `parse_iso`, `runtime_label`, `simctl_devices`, `iter_devices`, `find_simulators`, `sim_cache_paths`, `find_simulator_caches`, `device_states`), `source_missing`, `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `clear_dir`, `delete_entries`, config loaders (`load_config`, `env_worktree_roots`), `main`.
+One file: `xcode-clr`. Sections in order: dataclass `Entry`, scanners (DerivedData: `folder_hash`, `derived_data_hash`, `read_info_plist`, `local_package_paths`, `last_activity`, `find_derived_data`, `xcodebuild_targets`, `resolve_derived_sources`; worktrees: `git_worktree_paths`, `find_git_root`, `resolve_worktree_roots`, `list_worktrees`, `find_stale_builds`; simulators: `parse_iso`, `simulator_last_activity`, `runtime_label`, `simctl_devices`, `iter_devices`, `find_simulators`, `sim_cache_paths`, `find_simulator_caches`, `device_states`), `source_missing`, `mark_stale`, sizing (`du_bytes`, `compute_sizes` via `ThreadPoolExecutor`), renderers (`render_table`, `render_json`), `clear_dir`, `delete_entries`, config loaders (`load_config`, `env_worktree_roots`), `main`.
 
 Keep it one file. No deps. No `pip install`.
 
@@ -27,16 +27,16 @@ Command-line `xcodebuild` never writes `info.plist`, so those folders carry no `
 - Shebang is `/usr/bin/python3` (system 3.9). The homebrew Python 3.14 on this host has a broken `libexpat` link that crashes `plistlib`. Don't switch back to `env python3` until that's fixed.
 - All datetimes are timezone-aware UTC.
 - Sizes via `du -sk` (KB blocks → bytes ×1024). Matches Finder. Simulators reuse simctl's `dataPathSize` (no `du`); `compute_sizes` only `du`s entries with `size_bytes == 0`.
-- Staleness ts = `max(LastAccessedDate from info.plist, folder mtime, Logs/*/LogStoreManifest.plist mtimes)` for DerivedData (`last_activity`; the manifests are the only activity signal for `xcodebuild` folders); folder mtime for worktree builds; `lastBootedAt` for simulators (folder mtime is noise — bulk-touched by background activity, never use it as the sim signal).
+- Staleness ts = `max(LastAccessedDate from info.plist, folder mtime, Logs/*/LogStoreManifest.plist mtimes)` for DerivedData (`last_activity`; the manifests are the only activity signal for `xcodebuild` folders); folder mtime for worktree builds; `simulator_last_activity` for simulators (folder mtime is noise — bulk-touched by background activity, never use it as the sim signal).
 - Skip any DerivedData child whose name ends `.noindex` or matches the cache set; skip any folder with neither a `WorkspacePath` nor a hash-suffixed name.
 
 ## Simulators
 
-`find_simulators` parses `xcrun simctl list devices --json` (grouped by runtime id). Per device it reads `udid`, `dataPath` (parent = device dir = `Entry.path`), `lastBootedAt`, `dataPathSize`, `state`, `isAvailable`, `name`. `mark_stale` rules, in order:
+`find_simulators` parses `xcrun simctl list devices --json` (grouped by runtime id). Per device it reads `udid`, `dataPath` (parent = device dir = `Entry.path`), `lastBootedAt` (Xcode 26.x) / `lastUsedAt` (Xcode 27 / Device Hub), `dataPathSize`, `state`, `isAvailable`, `name`. `simulator_last_activity` returns the newer valid timestamp when both are present, or `None` when neither is valid. All simulator scanners and idle checks share it. `mark_stale` rules, in order:
 1. `not available` (runtime uninstalled) → `runtime unavailable`, always removable.
 2. `state != "Shutdown"` (booted / in use) → never touched.
 3. `last_accessed is None` (never booted — Xcode default template, ~17 MB) → left alone.
-4. else stale if `lastBootedAt` older than `--simulator-days` (own threshold, default 3 — passed separately from `--days` into `mark_stale`).
+4. else stale if simulator activity is older than `--simulator-days` (own threshold, default 3 — passed separately from `--days` into `mark_stale`).
 
 Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's registry consistent). `delete_entries` branches on `kind == "simulator"`. JSON sim items carry extra `name`, `udid`, `state`, `available` keys; top-level JSON carries `simulator_threshold_days`. Toggle scanning with `--no-simulators` / `scan_simulators` (default on). `simctl_devices()` is called once in `main` and shared with the cache scan.
 
@@ -50,7 +50,7 @@ Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's
 
 ## Idle shutdown
 
-`--shutdown-idle --idle-minutes N` (default 30) offers shutdown plus cache/WAL cleanup for booted devices with listed cleanup candidates. `simulator_idle_blocker` checks boot time, app-container mtime/ctime, running UIKit/container apps, and host test/build runners; failures block shutdown. This is a conservative heuristic, not measured user idle time. `shutdown_idle_simulator` rechecks activity before shutdown and requires confirmed `Shutdown`. Selection stays explicit; `--json`/`--dry-run` never shut down. Booted items keep `reason=None` and `to_be_removed=false`; `shutdown_then_clean` represents the conditional action. `requires_shutdown` and `after_shutdown_bytes` expose the preview. Cache/WAL operations recheck state individually.
+`--shutdown-idle --idle-minutes N` (default 30) offers shutdown plus cache/WAL cleanup for booted devices with listed cleanup candidates. `simulator_idle_blocker` checks simulator activity, app-container mtime/ctime, running UIKit/container apps, and host test/build runners; failures block shutdown. This is a conservative heuristic, not measured user idle time. `shutdown_idle_simulator` rechecks activity before shutdown and requires confirmed `Shutdown`. Selection stays explicit; `--json`/`--dry-run` never shut down. Booted items keep `reason=None` and `to_be_removed=false`; `shutdown_then_clean` represents the conditional action. `requires_shutdown` and `after_shutdown_bytes` expose the preview. Cache/WAL operations recheck state individually.
 
 ## Adding flags
 
@@ -64,7 +64,7 @@ Append to `argparse` block in `main()`. Flags that suppress deletion (`--dry-run
 ./xcode-clr --days 0 --dry-run      # every entry stale
 ```
 
-Run `/usr/bin/python3 -m unittest -v` for isolated WAL tests. Run dry-run + json before any change to a scanner or renderer. Never test cleanup on real simulator data.
+Run `/usr/bin/python3 -m unittest -v` for isolated simulator activity, WAL/cache and idle shutdown tests covering both Xcode timestamp schemas. Run dry-run + json before any change to a scanner or renderer. Never test cleanup on real simulator data.
 
 ## Skill
 

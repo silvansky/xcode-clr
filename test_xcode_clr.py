@@ -22,6 +22,8 @@ loader.exec_module(clr)
 
 
 class SimulatorWalTests(unittest.TestCase):
+    timestamp_field = "lastBootedAt"
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -38,7 +40,7 @@ class SimulatorWalTests(unittest.TestCase):
         self.wal = self.database.with_name("finance_cloud.db-wal")
         self.device = {
             "udid": "test-device", "dataPath": str(self.data), "name": "Test iPhone",
-            "state": "Shutdown", "isAvailable": True, "lastBootedAt": "2026-10-20T00:00:00Z",
+            "state": "Shutdown", "isAvailable": True, self.timestamp_field: "2026-10-20T00:00:00Z",
         }
         self.devices = {"com.apple.CoreSimulator.SimRuntime.iOS-18-6": [self.device]}
         self.now = datetime(2026, 10, 21, tzinfo=timezone.utc)
@@ -72,7 +74,7 @@ class SimulatorWalTests(unittest.TestCase):
         self.device["isAvailable"] = False
         self.assertEqual(self.entries(), [])
         self.device["isAvailable"] = True
-        self.device.pop("lastBootedAt")
+        self.device.pop(self.timestamp_field)
         self.assertEqual(self.entries(), [])
 
     def test_missing_database_or_wal_is_skipped(self):
@@ -253,7 +255,7 @@ class SimulatorWalTests(unittest.TestCase):
                 self.assertIn("inventory", clr.simulator_idle_blocker(self.device, 30, future))
         with patch.object(clr.subprocess, "run", side_effect=subprocess.TimeoutExpired("ps", 10)):
             self.assertIn("failed", clr.simulator_idle_blocker(self.device, 30, future))
-        self.device["lastBootedAt"] = future.isoformat()
+        self.device[self.timestamp_field] = future.isoformat()
         self.assertIn("recent", clr.simulator_idle_blocker(self.device, 30, future))
 
     def test_idle_preview_never_shuts_down_even_with_yes(self):
@@ -359,6 +361,96 @@ class SimulatorWalTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ex:
             self.run_main("--shutdown-idle", "--idle-minutes", "0", "--json")
         self.assertEqual(ex.exception.code, 2)
+
+
+class SimulatorWalXcode27Tests(SimulatorWalTests):
+    # Exercise the same scanner, preview, cleanup and shutdown safeguards with
+    # the Xcode 27 simctl schema; all data and cleanup remain temporary/mocked.
+    timestamp_field = "lastUsedAt"
+
+
+class SimulatorActivityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.data = Path(self.temp.name) / "data"
+        (self.data / "tmp").mkdir(parents=True)
+        self.device = {
+            "udid": "test-device", "dataPath": str(self.data), "name": "Test iPhone",
+            "state": "Shutdown", "isAvailable": True, "dataPathSize": 1024,
+        }
+        self.devices = {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [self.device]}
+        self.now = datetime(2026, 10, 30, tzinfo=timezone.utc)
+        self.old = self.now - timedelta(days=10)
+        self.recent = self.now - timedelta(minutes=5)
+
+    def test_stale_and_recent_devices_on_both_xcode_versions(self):
+        for field in ("lastBootedAt", "lastUsedAt"):
+            for activity, reason in ((self.old, "stale >3d"), (self.recent, None)):
+                with self.subTest(field=field, activity=activity):
+                    self.device.pop("lastBootedAt", None)
+                    self.device.pop("lastUsedAt", None)
+                    self.device[field] = activity.isoformat()
+                    entry, = clr.find_simulators(self.devices)
+                    clr.mark_stale([entry], 2, 3, self.now)
+                    self.assertEqual(entry.last_accessed, activity)
+                    self.assertEqual(entry.reason, reason)
+                    item, = json.loads(clr.render_json([entry], 2, 3, self.now))["items"]
+                    self.assertEqual(item["to_be_removed"], reason is not None)
+                    self.assertAlmostEqual(item["age_days"], (self.now - activity).total_seconds() / 86400, places=2)
+
+    def test_newer_timestamp_protects_device_and_blocks_idle_shutdown(self):
+        self.device["state"] = "Booted"
+        for older_field, newer_field in (("lastBootedAt", "lastUsedAt"), ("lastUsedAt", "lastBootedAt")):
+            with self.subTest(newer_field=newer_field):
+                self.device[older_field] = self.old.isoformat()
+                self.device[newer_field] = self.recent.isoformat()
+                self.assertEqual(clr.simulator_last_activity(self.device), self.recent)
+                with patch.object(clr.subprocess, "run") as run:
+                    self.assertIn("recent", clr.simulator_idle_blocker(self.device, 30, self.now))
+                    run.assert_not_called()
+                self.device["state"] = "Shutdown"
+                entry, = clr.find_simulators(self.devices)
+                clr.mark_stale([entry], 2, 3, self.now)
+                self.assertIsNone(entry.reason)
+                self.device["state"] = "Booted"
+
+    def test_missing_or_invalid_timestamps_keep_devices_and_skip_caches(self):
+        for value in (None, "", "invalid"):
+            with self.subTest(value=value):
+                self.device.update(lastBootedAt=value, lastUsedAt=value)
+                entry, = clr.find_simulators(self.devices)
+                clr.mark_stale([entry], 2, 3, self.now)
+                self.assertIsNone(entry.last_accessed)
+                self.assertIsNone(entry.reason)
+                self.assertEqual(clr.find_simulator_caches(self.devices), [])
+                self.device["state"] = "Booted"
+                with patch.object(clr.subprocess, "run") as run:
+                    self.assertIn("unknown", clr.simulator_idle_blocker(self.device, 30, self.now))
+                    run.assert_not_called()
+                self.device["state"] = "Shutdown"
+
+    def test_valid_timestamp_survives_invalid_other_field(self):
+        for valid_field, invalid_field in (("lastBootedAt", "lastUsedAt"), ("lastUsedAt", "lastBootedAt")):
+            with self.subTest(valid_field=valid_field):
+                self.device[valid_field] = self.old.isoformat()
+                self.device[invalid_field] = "invalid"
+                self.assertEqual(clr.simulator_last_activity(self.device), self.old)
+
+    def test_timestamps_are_normalized_to_utc(self):
+        self.device.update(lastBootedAt="2026-10-20T03:00:00+03:00", lastUsedAt="2026-10-20T01:00:00")
+        self.assertEqual(clr.simulator_last_activity(self.device), datetime(2026, 10, 20, 1, tzinfo=timezone.utc))
+
+    def test_booted_device_with_old_activity_is_kept_on_both_versions(self):
+        self.device["state"] = "Booted"
+        for field in ("lastBootedAt", "lastUsedAt"):
+            with self.subTest(field=field):
+                self.device.pop("lastBootedAt", None)
+                self.device.pop("lastUsedAt", None)
+                self.device[field] = self.old.isoformat()
+                entry, = clr.find_simulators(self.devices)
+                clr.mark_stale([entry], 2, 3, self.now)
+                self.assertIsNone(entry.reason)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ Delete stale Xcode DerivedData, worktree `build/` directories, long-unused iOS S
 
 Single-file Python 3 CLI. No dependencies. macOS only.
 
+Supports Xcode 26.x and Xcode 27 (Device Hub) through `xcrun simctl`. Simulator activity uses `lastBootedAt` on Xcode 26.x and `lastUsedAt` on Xcode 27; if both are present, the newer valid timestamp wins. Available devices without a valid activity timestamp are kept and their caches/WALs are skipped.
+
 ## What it scans
 
 - `~/Library/Developer/Xcode/DerivedData/*` — each project folder. Skips shared caches (`ModuleCache.noindex`, `SDKStatCaches.noindex`, `CompilationCache.noindex`).
@@ -19,7 +21,7 @@ An item is marked `to_be_removed` if **any** apply:
 - DerivedData source no longer exists → `source missing`. Source is `WorkspacePath` from `info.plist`. Folders made by command-line `xcodebuild` have no `info.plist`, so the folder-name hash is matched against `.xcworkspace` / `.xcodeproj` / `Package.swift` paths in known worktrees; if nothing matches, `source missing` needs every local package path in `SourcePackages/workspace-state.json` to be gone.
 - `max(LastAccessedDate, folder mtime, Logs/*/LogStoreManifest.plist mtime)` is older than 2 days → `stale >2d` (override with `--days`).
 - Worktree `build/` folder mtime older than 2 days → `stale >2d`.
-- Simulator last booted (`lastBootedAt`) older than 3 days → `stale >3d` (override with `--simulator-days`).
+- Simulator last activity (`lastBootedAt` / `lastUsedAt`) older than 3 days → `stale >3d` (override with `--simulator-days`).
 - Simulator whose runtime is no longer installed → `runtime unavailable`.
 - Caches inside a shut-down simulator → `purgeable` (always; entries under 50 MB are hidden). The device's state is re-checked right before clearing.
 - Finance WAL inside a shut-down simulator → `checkpoint`, regardless of age. Device state is re-checked before each checkpoint; locked databases report failure. WAL size is an upper estimate of savings because checkpointing can grow the database. WALs are never directly deleted.
@@ -51,7 +53,7 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 
 The default output includes a separate **Available after simulator shutdown** table with device names, cache/WAL sizes, and a total estimate. These entries are excluded from normal cleanup, including `--yes`. The existing 50 MB minimum applies to each cache/WAL entry.
 
-With `--shutdown-idle`, a device is considered idle when its boot time and all app-container modification/change times are older than `--idle-minutes`, and no app or test process is detected. Checks cover app data, shared app groups, and installed app bundles. Running UIKit apps block shutdown, except passive Spotlight and widget-rendering services. Any detected host `xcodebuild`, `xctest`, or test runner blocks automatic shutdown conservatively. System daemon writes (including Finance WAL growth) are not an activity signal.
+With `--shutdown-idle`, a device is considered idle when its simulator activity timestamp and all app-container modification/change times are older than `--idle-minutes`, and no app or test process is detected. Checks cover app data, shared app groups, and installed app bundles. Running UIKit apps block shutdown, except passive Spotlight and widget-rendering services. Any detected host `xcodebuild`, `xctest`, or test runner blocks automatic shutdown conservatively. System daemon writes (including Finance WAL growth) are not an activity signal.
 
 This is a heuristic, not a record of user interaction. Unknown states, failed process checks, and unreadable containers block shutdown. Checks run again immediately before shutdown; cleanup requires confirmed `Shutdown` state. A process can start between checks. `--dry-run` and `--json` only preview, even with `--yes`; actual shutdown uses the normal selection prompt or `--yes`. Only devices with listed cache/WAL cleanup candidates are considered, and this option does not select them for device deletion.
 
@@ -135,13 +137,13 @@ Precedence: CLI flags > env > config file > built-in defaults. `worktree_roots` 
 }
 ```
 
-`kind` is `"derived_data"`, `"worktree_build"`, `"simulator"`, `"simulator_cache"`, or `"simulator_wal"`. `reason` is `null` for kept items. Simulator items add `name`, `udid`, `state`, and `available`; their `last_accessed` is the device's last boot time. Simulator-cache items also list `purge_paths`, the directories whose contents get cleared. WAL items use `path` for the WAL, `source_path` for the database, and `action: "checkpoint"`; `to_be_removed` means selected for checkpointing, not database deletion. Totals count a selected simulator only once, including its caches and WAL.
+`kind` is `"derived_data"`, `"worktree_build"`, `"simulator"`, `"simulator_cache"`, or `"simulator_wal"`. `reason` is `null` for kept items. Simulator items add `name`, `udid`, `state`, and `available`; their `last_accessed` is the device's last activity timestamp (`lastBootedAt` / `lastUsedAt`). Simulator-cache items also list `purge_paths`, the directories whose contents get cleared. WAL items use `path` for the WAL, `source_path` for the database, and `action: "checkpoint"`; `to_be_removed` means selected for checkpointing, not database deletion. Totals count a selected simulator only once, including its caches and WAL.
 
 Cache/WAL items also include `requires_shutdown`, `shutdown_then_clean` (eligible with `--shutdown-idle`), and `idle_blocker` (why automatic shutdown was refused). Booted entries retain `to_be_removed: false`; `shutdown_then_clean` describes the conditional action separately. Top-level `after_shutdown_bytes` estimates cache/WAL space on devices requiring shutdown.
 
 ## Tests
 
-`/usr/bin/python3 -m unittest -v` runs isolated temporary-database tests. No real simulators are modified.
+`/usr/bin/python3 -m unittest -v` tests both Xcode timestamp schemas, staleness, previews, idle checks, and WAL/cache cleanup using temporary data and mocked simulator commands. No real simulators are modified.
 
 ## Examples
 

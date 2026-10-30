@@ -67,7 +67,7 @@ class Entry:
     @property
     def staleness_ts(self) -> datetime:
         if self.kind in ("simulator", "simulator_cache", "simulator_wal"):
-            return self.last_accessed or self.mtime  # last boot, else folder mtime
+            return self.last_accessed or self.mtime  # last simulator activity, else folder mtime
         return max(self.mtime, self.last_accessed) if self.last_accessed else self.mtime
 
     def age_days(self, now: datetime) -> float:
@@ -258,9 +258,17 @@ def parse_iso(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def simulator_last_activity(device: dict) -> Optional[datetime]:
+    # Xcode 26.x reports lastBootedAt; Xcode 27 reports lastUsedAt.
+    # Prefer the latest activity if both fields are present.
+    timestamps = [parse_iso(device.get(key)) for key in ("lastBootedAt", "lastUsedAt")]
+    return max((ts for ts in timestamps if ts is not None), default=None)
 
 
 def runtime_label(runtime_id: str) -> str:
@@ -296,13 +304,13 @@ def find_simulators(devices: dict) -> list[Entry]:
     for rt, d in iter_devices(devices):
         udid = d["udid"]
         device_dir = Path(d["dataPath"]).parent
-        last_booted = parse_iso(d.get("lastBootedAt"))
+        last_used = simulator_last_activity(d)
         try:
             mtime = datetime.fromtimestamp(device_dir.stat().st_mtime, tz=timezone.utc)
         except OSError:
-            if last_booted is None:
+            if last_used is None:
                 continue
-            mtime = last_booted
+            mtime = last_used
         state = d.get("state")
         name = d.get("name") or udid
         tags = [t for t in (rt, None if state == "Shutdown" else state) if t]
@@ -311,7 +319,7 @@ def find_simulators(devices: dict) -> list[Entry]:
             kind="simulator",
             source_path=None,
             mtime=mtime,
-            last_accessed=last_booted,
+            last_accessed=last_used,
             size_bytes=int(d.get("dataPathSize") or 0),
             udid=udid,
             state=state,
@@ -331,8 +339,8 @@ def sim_cache_paths(data_dir: Path) -> list[Path]:
 def find_simulator_caches(devices: dict) -> list[Entry]:
     entries: list[Entry] = []
     for rt, d in iter_devices(devices):
-        last_booted = parse_iso(d.get("lastBootedAt"))
-        if not d.get("isAvailable") or last_booted is None:
+        last_used = simulator_last_activity(d)
+        if not d.get("isAvailable") or last_used is None:
             continue
         data_dir = Path(d["dataPath"])
         purge = sim_cache_paths(data_dir)
@@ -342,8 +350,8 @@ def find_simulator_caches(devices: dict) -> list[Entry]:
             path=data_dir,
             kind="simulator_cache",
             source_path=None,
-            mtime=last_booted,
-            last_accessed=last_booted,
+            mtime=last_used,
+            last_accessed=last_used,
             udid=d["udid"],
             state=d.get("state"),
             label=f"{d.get('name') or d['udid']} · {rt} · caches · {d.get('state') or 'unknown'}",
@@ -359,8 +367,8 @@ def device_states() -> dict[str, str]:
 def find_simulator_wals(devices: dict) -> list[Entry]:
     entries: list[Entry] = []
     for rt, d in iter_devices(devices):
-        last_booted = parse_iso(d.get("lastBootedAt"))
-        if not d.get("isAvailable") or last_booted is None:
+        last_used = simulator_last_activity(d)
+        if not d.get("isAvailable") or last_used is None:
             continue
         database = Path(d["dataPath"]) / SIM_WAL_DATABASE
         wal = database.with_name(database.name + "-wal")
@@ -370,8 +378,8 @@ def find_simulator_wals(devices: dict) -> list[Entry]:
             path=wal,
             kind="simulator_wal",
             source_path=database,
-            mtime=last_booted,
-            last_accessed=last_booted,
+            mtime=last_used,
+            last_accessed=last_used,
             udid=d["udid"],
             state=d.get("state"),
             label=f"{d.get('name') or d['udid']} · {rt} · Finance WAL · {d.get('state') or 'unknown'}",
@@ -388,10 +396,10 @@ def source_missing(e: Entry) -> bool:
 def simulator_idle_blocker(device: dict, minutes: int, now: datetime) -> Optional[str]:
     if device.get("state") != "Booted":
         return f"device is {device.get('state') or 'unknown'}"
-    booted = parse_iso(device.get("lastBootedAt"))
+    last_used = simulator_last_activity(device)
     cutoff = now.timestamp() - minutes * 60
-    if booted is None or booted.timestamp() > cutoff:
-        return "recent or unknown boot time"
+    if last_used is None or last_used.timestamp() > cutoff:
+        return "recent or unknown simulator activity"
     try:
         processes = subprocess.run(["ps", "-axo", "comm="], capture_output=True,
                                    text=True, check=True, timeout=10).stdout

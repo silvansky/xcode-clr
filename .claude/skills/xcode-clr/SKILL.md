@@ -8,7 +8,7 @@ description: Use this skill when the user wants to free disk space by cleaning X
 `xcode-clr` lists & deletes:
 - DerivedData folders whose source workspace is gone or untouched >2 days.
 - `build/` folders inside `git worktree list` entries untouched >2 days.
-- iOS Simulator devices not booted in >3 days (`--simulator-days`), or whose runtime is uninstalled.
+- iOS Simulator devices unused for >3 days (`--simulator-days`), or whose runtime is uninstalled. Supports Xcode 26.x (`lastBootedAt`) and Xcode 27 / Device Hub (`lastUsedAt`); uses the newer valid timestamp if both exist.
 - Purgeable caches inside shut-down simulators (abandoned `nsurlsessiond` downloads, `coresymbolicationd`, dead app containers, `tmp`, per-app caches). Contents only; the device stays.
 - Large Finance database WALs (`finance_cloud.db-wal`), checkpointed through SQLite on shut-down devices without deleting database data. Skip with `--no-simulator-wals`.
 
@@ -22,7 +22,7 @@ Worktree roots are **auto-discovered** from DerivedData (`WorkspacePath`, or Swi
 xcode-clr --json
 ```
 
-Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`|`simulator`|`simulator_cache`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`. Simulator and simulator-cache items add `name`, `udid`, `state`, `available` (and `last_accessed` is the last boot time); simulator-cache items also list `purge_paths`. Top-level `disk` carries `free_bytes`/`total_bytes`/`used_bytes`.
+Parse `items[]`. Each item: `path`, `kind` (`derived_data`|`worktree_build`|`simulator`|`simulator_cache`), `source_path`, `size_bytes`, `last_accessed`, `mtime`, `age_days`, `reason`, `to_be_removed`. Simulator and simulator-cache items add `name`, `udid`, `state`, `available` (and `last_accessed` is the last activity from `lastBootedAt` / `lastUsedAt`); simulator-cache items also list `purge_paths`. Top-level `disk` carries `free_bytes`/`total_bytes`/`used_bytes`.
 
 To delete after the user confirms:
 
