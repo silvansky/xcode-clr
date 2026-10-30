@@ -30,6 +30,7 @@ SIM_CACHE_SUBPATHS = (
 SIM_CACHE_GLOBS = ("Containers/Data/Application/*/Library/Caches", "Containers/Data/Application/*/tmp")
 SIM_CACHE_MIN_BYTES = 50 * 1024 * 1024
 SIM_WAL_DATABASE = Path("Library/Finance/finance_cloud.db")
+SIM_RESET_MIN_BYTES = 2 * 1024 ** 3
 
 USE_COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
 ANSI = {"red": "31", "green": "32", "yellow": "33", "magenta": "35", "cyan": "36"}
@@ -59,10 +60,15 @@ class Entry:
     purge_paths: list[Path] = field(default_factory=list)     # simulator_cache only: dirs whose contents get cleared
     shutdown_idle: bool = False
     idle_blocker: Optional[str] = None
+    reset_idle: bool = False
+
+    @property
+    def oversized_simulator(self) -> bool:
+        return self.kind == "simulator" and self.size_bytes > SIM_RESET_MIN_BYTES
 
     @property
     def requires_shutdown(self) -> bool:
-        return self.kind in ("simulator_cache", "simulator_wal") and self.state != "Shutdown"
+        return (self.kind in ("simulator_cache", "simulator_wal") or self.reset_idle) and self.state != "Shutdown"
 
     @property
     def staleness_ts(self) -> datetime:
@@ -393,8 +399,9 @@ def source_missing(e: Entry) -> bool:
     return bool(e.local_packages) and not any(p.exists() for p in e.local_packages)
 
 
-def simulator_idle_blocker(device: dict, minutes: int, now: datetime) -> Optional[str]:
-    if device.get("state") != "Booted":
+def simulator_idle_blocker(device: dict, minutes: int, now: datetime,
+                           allow_shutdown: bool = False) -> Optional[str]:
+    if device.get("state") not in (("Booted", "Shutdown") if allow_shutdown else ("Booted",)):
         return f"device is {device.get('state') or 'unknown'}"
     last_used = simulator_last_activity(device)
     cutoff = now.timestamp() - minutes * 60
@@ -411,21 +418,22 @@ def simulator_idle_blocker(device: dict, minutes: int, now: datetime) -> Optiona
                 return "test/build runner active on host"
             if f"/{device['udid']}/data/Containers/" in process:
                 return "app process running"
-        jobs = subprocess.run(["xcrun", "simctl", "spawn", device["udid"], "launchctl", "list"],
-                              capture_output=True, text=True, check=True, timeout=10).stdout
-        if not jobs.startswith("PID"):
-            return "unrecognized process inventory"
-        for line in jobs.splitlines()[1:]:
-            fields = line.split(None, 2)
-            if len(fields) != 3:
+        if device.get("state") == "Booted":
+            jobs = subprocess.run(["xcrun", "simctl", "spawn", device["udid"], "launchctl", "list"],
+                                  capture_output=True, text=True, check=True, timeout=10).stdout
+            if not jobs.startswith("PID"):
                 return "unrecognized process inventory"
-            pid, _, label = fields
-            if not pid.isdigit():
-                continue
-            passive = label.startswith(("UIKitApplication:com.apple.Spotlight[",
-                                        "UIKitApplication:com.apple.chrono.WidgetRenderer-"))
-            if (label.startswith("UIKitApplication:") and not passive) or "xctest" in label.lower():
-                return f"app/test running: {label}"
+            for line in jobs.splitlines()[1:]:
+                fields = line.split(None, 2)
+                if len(fields) != 3:
+                    return "unrecognized process inventory"
+                pid, _, label = fields
+                if not pid.isdigit():
+                    continue
+                passive = label.startswith(("UIKitApplication:com.apple.Spotlight[",
+                                            "UIKitApplication:com.apple.chrono.WidgetRenderer-"))
+                if (label.startswith("UIKitApplication:") and not passive) or "xctest" in label.lower():
+                    return f"app/test running: {label}"
         data_dir = Path(device["dataPath"])
         if not data_dir.is_dir():
             return "device data missing"
@@ -459,6 +467,42 @@ def shutdown_idle_simulator(udid: str, minutes: int) -> None:
     if device_states().get(udid) != "Shutdown":
         raise RuntimeError("shutdown not confirmed; cleanup skipped")
     print(f"  shut down {device.get('name') or udid}")
+
+
+def prepare_simulator_resets(entries: list[Entry], devices: dict, minutes: int, now: datetime) -> None:
+    by_udid = {d["udid"]: d for _, d in iter_devices(devices)}
+    for e in entries:
+        if not e.oversized_simulator or not e.available:
+            continue
+        # An explicit reset request replaces deletion for these devices, even if blocked.
+        e.reason = None
+        device = by_udid.get(e.udid)
+        e.idle_blocker = (simulator_idle_blocker(device, minutes, now, allow_shutdown=True)
+                          if device else "device missing")
+        e.reset_idle = e.idle_blocker is None
+
+
+def reset_idle_simulator(udid: str, minutes: int) -> int:
+    def checked_device() -> dict:
+        device = next((d for _, d in iter_devices(simctl_devices()) if d["udid"] == udid), None)
+        if device is None or not device.get("isAvailable"):
+            raise RuntimeError("device missing or runtime unavailable")
+        blocker = simulator_idle_blocker(device, minutes, datetime.now(timezone.utc), allow_shutdown=True)
+        if blocker:
+            raise RuntimeError(f"not idle: {blocker}")
+        return device
+
+    device = checked_device()
+    if device.get("state") == "Booted":
+        shutdown_idle_simulator(udid, minutes)
+        device = checked_device()
+    path = Path(device["dataPath"]).parent
+    before = du_bytes([path])
+    if device.get("state") != "Shutdown" or device_states().get(udid) != "Shutdown":
+        raise RuntimeError("shutdown not confirmed; reset skipped")
+    subprocess.run(["xcrun", "simctl", "erase", udid], capture_output=True,
+                   text=True, check=True, timeout=120)
+    return max(0, before - du_bytes([path]))
 
 
 def mark_stale(entries: list[Entry], days: int, sim_days: int, now: datetime) -> None:
@@ -550,6 +594,7 @@ def render_table(entries: list[Entry], now: datetime, numbered: bool = False) ->
         row = (
             human_size(e.size_bytes),
             f"{e.age_days(now):.1f}d",
+            ("shutdown + reset" if e.requires_shutdown else "reset") if e.reset_idle else
             e.reason or ("shutdown + clean" if e.shutdown_idle else "shutdown required" if e.requires_shutdown else "-"),
             e.kind,
             truncate_left(e.label or short_path(e.source_path), 70),
@@ -589,6 +634,10 @@ def render_json(entries: list[Entry], threshold_days: int, sim_threshold_days: i
         }
         if e.kind in ("simulator", "simulator_cache", "simulator_wal"):
             item.update(name=e.label, udid=e.udid, state=e.state, available=e.available)
+        if e.kind == "simulator":
+            item.update(oversized=e.oversized_simulator, to_be_reset=e.reset_idle,
+                        requires_shutdown=e.requires_shutdown, idle_blocker=e.idle_blocker,
+                        action="reset" if e.reset_idle else "delete" if e.reason else None)
         if e.kind in ("simulator_cache", "simulator_wal"):
             item.update(requires_shutdown=e.requires_shutdown, shutdown_then_clean=e.shutdown_idle,
                         idle_blocker=e.idle_blocker)
@@ -602,7 +651,8 @@ def render_json(entries: list[Entry], threshold_days: int, sim_threshold_days: i
         "scanned_at": iso(now),
         "threshold_days": threshold_days,
         "simulator_threshold_days": sim_threshold_days,
-        "after_shutdown_bytes": sum(e.size_bytes for e in entries if e.requires_shutdown),
+        "after_shutdown_bytes": total_size([e for e in entries if e.requires_shutdown]),
+        "simulator_reset_threshold_bytes": SIM_RESET_MIN_BYTES,
         "disk": {"free_bytes": free, "total_bytes": total, "used_bytes": total - free},
         "items": items,
     }, indent=2)
@@ -655,6 +705,14 @@ def delete_entries(entries: list[Entry], idle_minutes: Optional[int] = None) -> 
         if e.kind in ("simulator_cache", "simulator_wal") and e.udid in removed_simulators:
             continue
         try:
+            if e.kind == "simulator" and e.reset_idle:
+                removed_simulators.add(e.udid)  # reset covers caches/WALs, even on failure
+                if idle_minutes is None:
+                    raise RuntimeError("idle threshold required, reset skipped")
+                reclaimed = reset_idle_simulator(e.udid, idle_minutes)
+                freed += reclaimed
+                print(f"  reset {e.label or e.path} ({human_size(reclaimed)} freed)")
+                continue
             if e.requires_shutdown:
                 if not e.shutdown_idle or idle_minutes is None:
                     raise RuntimeError("shutdown required, skipped")
@@ -752,7 +810,9 @@ def main() -> int:
     p.add_argument("--no-simulator-wals", dest="simulator_wals", action="store_false",
                    default=cfg_sim_wals, help="skip Finance database WAL checkpointing")
     p.add_argument("--shutdown-idle", action="store_true", help="offer shutdown and cache/WAL cleanup for idle simulators")
-    p.add_argument("--idle-minutes", type=int, default=30, help="minimum app inactivity before shutdown (default 30)")
+    p.add_argument("--idle-minutes", type=int, default=30, help="minimum app inactivity before shutdown/reset (default 30)")
+    p.add_argument("--reset-idle", action="store_true",
+                   help="offer reset of idle simulators over 2 GB; erases all apps, data and settings")
     args = p.parse_args()
     if args.idle_minutes < 1:
         p.error("--idle-minutes must be at least 1")
@@ -788,18 +848,34 @@ def main() -> int:
             if e.requires_shutdown:
                 e.idle_blocker = blockers.get(e.udid, "device missing")
                 e.shutdown_idle = e.idle_blocker is None
+    if args.reset_idle:
+        prepare_simulator_resets(entries, devices, args.idle_minutes, now)
 
     if args.json:
         print(render_json(entries, args.days, args.simulator_days, now))
         return 0
 
-    stale = [e for e in entries if e.reason or e.shutdown_idle]
+    reset_udids = {e.udid for e in entries if e.reset_idle}
+    stale = [e for e in entries if (e.reason or e.shutdown_idle or e.reset_idle)
+             and not (e.kind in ("simulator_cache", "simulator_wal") and e.udid in reset_udids)]
     total = total_size(stale)
 
     free, total_disk = disk_usage()
     disk_line = f"Disk: {human_size(free)} free of {human_size(total_disk)}"
     interactive = bool(stale) and not args.dry_run and not args.yes
-    blocked = [e for e in entries if e.requires_shutdown]
+    large = [e for e in entries if e.oversized_simulator]
+    if large:
+        print("Warning: simulators over 2 GB. Reset erases ALL installed apps, app data and settings.")
+        print(render_table(large, now))
+        print("Use --reset-idle to offer reset of idle devices (default 30 minutes; --idle-minutes N).")
+        print("Reset sizes are estimates; system assets may download again.")
+        if args.reset_idle:
+            for e in large:
+                if e.idle_blocker or not e.available:
+                    print(f"  {e.udid}: reset skipped — {e.idle_blocker or 'runtime unavailable'}")
+        print()
+    blocked = [e for e in entries if e.kind in ("simulator_cache", "simulator_wal") and e.requires_shutdown
+               and e.udid not in reset_udids]
     if blocked:
         print("Available after simulator shutdown (estimated):")
         print(render_table(blocked, now))
@@ -858,7 +934,7 @@ def main() -> int:
                 print("Nothing selected. Aborted.")
                 return 0
 
-    freed = delete_entries(selected, idle_minutes=args.idle_minutes if args.shutdown_idle else None)
+    freed = delete_entries(selected, idle_minutes=args.idle_minutes if args.shutdown_idle or args.reset_idle else None)
     free_after, total_after = disk_usage()
     print(f"\nFreed {human_size(freed)}. Disk: {human_size(free_after)} free of {human_size(total_after)}")
     return 0

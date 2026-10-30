@@ -453,5 +453,237 @@ class SimulatorActivityTests(unittest.TestCase):
                 self.assertIsNone(entry.reason)
 
 
+class SimulatorResetTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.data = Path(self.temp.name) / "data"
+        self.data.mkdir()
+        self.now = datetime.now(timezone.utc)
+        self.device = {
+            "udid": "test-device", "dataPath": str(self.data), "name": "Large iPhone",
+            "state": "Shutdown", "isAvailable": True, "dataPathSize": 3 * 1024 ** 3,
+            "lastUsedAt": (self.now - timedelta(hours=1)).isoformat(),
+        }
+        self.devices = {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [self.device]}
+
+    def entry(self):
+        entry, = clr.find_simulators(self.devices)
+        clr.mark_stale([entry], 2, 3, self.now)
+        return entry
+
+    def run_main(self, *flags, answer="n", blocker=None, caches=False):
+        output = io.StringIO()
+        cache_flags = [] if caches else ["--no-simulator-caches"]
+        with patch.object(sys, "argv", ["xcode-clr", "--no-auto", *cache_flags,
+                                       "--no-simulator-wals", *flags]), \
+                patch.object(clr, "load_config", return_value={}), \
+                patch.object(clr, "find_derived_data", return_value=[]), \
+                patch.object(clr, "env_worktree_roots", return_value=[]), \
+                patch.object(clr, "simctl_devices", return_value=self.devices), \
+                patch.object(clr, "simulator_idle_blocker", return_value=blocker), \
+                patch.object(clr, "delete_entries", return_value=0) as delete, \
+                patch.object(clr, "reset_idle_simulator") as reset, \
+                patch("builtins.input", return_value=answer) as prompt, redirect_stdout(output):
+            self.assertEqual(clr.main(), 0)
+            reset.assert_not_called()
+        return output.getvalue(), delete, prompt
+
+    def test_warning_and_reset_offer_are_visible_without_all(self):
+        for flags in (("--dry-run",), ("--yes",), ()):
+            with self.subTest(flags=flags):
+                output, delete, prompt = self.run_main(*flags)
+                self.assertIn("Warning: simulators over 2 GB", output)
+                self.assertIn("Large iPhone", output)
+                self.assertIn("--reset-idle", output)
+                self.assertIn("ALL installed apps, app data and settings", output)
+                delete.assert_not_called()
+                prompt.assert_not_called()
+
+    def test_strict_size_boundary_and_disabled_scan(self):
+        for size in (clr.SIM_RESET_MIN_BYTES - 1, clr.SIM_RESET_MIN_BYTES, clr.SIM_RESET_MIN_BYTES + 1):
+            self.device["dataPathSize"] = size
+            output, _, _ = self.run_main("--dry-run")
+            self.assertEqual("Warning:" in output, size > clr.SIM_RESET_MIN_BYTES)
+        output, delete, _ = self.run_main("--reset-idle", "--no-simulators", "--yes")
+        self.assertNotIn("Warning:", output)
+        delete.assert_not_called()
+
+    def test_preview_only_and_json_distinguishes_reset_from_deletion(self):
+        for state in ("Booted", "Shutdown"):
+            self.device["state"] = state
+            for mode in ("--json", "--dry-run"):
+                with self.subTest(state=state, mode=mode):
+                    output, delete, prompt = self.run_main("--reset-idle", "--yes", mode)
+                    delete.assert_not_called()
+                    prompt.assert_not_called()
+                    if mode == "--json":
+                        data = json.loads(output)
+                        item, = data["items"]
+                        self.assertTrue(item["oversized"])
+                        self.assertTrue(item["to_be_reset"])
+                        self.assertFalse(item["to_be_removed"])
+                        self.assertEqual(item["action"], "reset")
+                        self.assertEqual(item["requires_shutdown"], state == "Booted")
+                        self.assertEqual(data["simulator_reset_threshold_bytes"], 2 * 1024 ** 3)
+                    else:
+                        self.assertIn("shutdown + reset" if state == "Booted" else "reset", output)
+
+    def test_reset_requires_flag_and_normal_selection_or_yes(self):
+        for state in ("Booted", "Shutdown"):
+            self.device["state"] = state
+            _, delete, _ = self.run_main("--reset-idle", answer="n")
+            delete.assert_not_called()
+            for flags, answer in ((("--reset-idle",), "1"), (("--reset-idle", "--yes"), "n")):
+                _, delete, _ = self.run_main(*flags, answer=answer)
+                delete.assert_called_once()
+                entry, = delete.call_args.args[0]
+                self.assertTrue(entry.reset_idle)
+                self.assertEqual(delete.call_args.kwargs["idle_minutes"], 30)
+
+    def test_blocked_reset_does_not_fall_back_to_device_deletion(self):
+        self.device["lastUsedAt"] = (self.now - timedelta(days=10)).isoformat()
+        output, delete, _ = self.run_main("--reset-idle", "--yes", blocker="test/build runner active")
+        delete.assert_not_called()
+        self.assertIn("reset skipped — test/build runner active", output)
+        output, delete, _ = self.run_main("--yes")
+        self.assertEqual(delete.call_args.args[0][0].reason, "stale >3d")
+
+    def test_reset_eligibility_uses_both_timestamp_schemas_and_fails_closed(self):
+        for field in ("lastBootedAt", "lastUsedAt"):
+            self.device.pop("lastBootedAt", None)
+            self.device.pop("lastUsedAt", None)
+            self.device[field] = (self.now - timedelta(hours=1)).isoformat()
+            with patch.object(clr.subprocess, "run", return_value=Mock(stdout="/sbin/launchd\n")):
+                entry = self.entry()
+                clr.prepare_simulator_resets([entry], self.devices, 30, self.now)
+                self.assertTrue(entry.reset_idle)
+            for value in (None, "invalid", self.now.isoformat()):
+                self.device[field] = value
+                entry = self.entry()
+                clr.prepare_simulator_resets([entry], self.devices, 30, self.now)
+                self.assertFalse(entry.reset_idle)
+                self.assertIn("recent or unknown", entry.idle_blocker)
+
+    def test_reset_skips_unavailable_devices_and_unknown_states(self):
+        self.device["isAvailable"] = False
+        entry = self.entry()
+        with patch.object(clr, "simulator_idle_blocker") as check:
+            clr.prepare_simulator_resets([entry], self.devices, 30, self.now)
+            check.assert_not_called()
+        self.assertFalse(entry.reset_idle)
+        self.assertEqual(entry.reason, "runtime unavailable")
+        self.device["isAvailable"] = True
+        for state in (None, "Booting", "Shutting Down"):
+            self.device["state"] = state
+            entry = self.entry()
+            clr.prepare_simulator_resets([entry], self.devices, 30, self.now)
+            self.assertFalse(entry.reset_idle)
+
+    def test_shutdown_device_still_checks_processes_and_app_containers(self):
+        with patch.object(clr.subprocess, "run", return_value=Mock(stdout="/usr/bin/xcodebuild\n")):
+            self.assertIn("runner active", clr.simulator_idle_blocker(self.device, 30, self.now, allow_shutdown=True))
+        app = self.data / "Containers/Data/Application/app"
+        app.mkdir(parents=True)
+        with patch.object(clr.subprocess, "run", return_value=Mock(stdout="/sbin/launchd\n")) as run:
+            self.assertIn("app-container activity", clr.simulator_idle_blocker(self.device, 30, self.now, allow_shutdown=True))
+            run.assert_called_once()  # no simctl spawn on a shut-down simulator
+        with patch.object(clr.subprocess, "run", side_effect=PermissionError("denied")):
+            self.assertIn("failed", clr.simulator_idle_blocker(self.device, 30, self.now, allow_shutdown=True))
+
+    def test_reset_rechecks_idle_and_shutdown_and_measures_savings(self):
+        with patch.object(clr, "simctl_devices", return_value=self.devices), \
+                patch.object(clr, "simulator_idle_blocker", return_value=None) as check, \
+                patch.object(clr, "device_states", return_value={"test-device": "Shutdown"}), \
+                patch.object(clr, "du_bytes", side_effect=[3000, 100]), \
+                patch.object(clr.subprocess, "run") as run:
+            self.assertEqual(clr.reset_idle_simulator("test-device", 60), 2900)
+            self.assertEqual(check.call_args.args[:2], (self.device, 60))
+            self.assertTrue(check.call_args.kwargs["allow_shutdown"])
+            self.assertEqual(run.call_args.args[0], ["xcrun", "simctl", "erase", "test-device"])
+            self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_reset_shuts_down_booted_device_then_checks_again(self):
+        self.device["state"] = "Booted"
+        stopped = dict(self.device, state="Shutdown")
+        with patch.object(clr, "simctl_devices", side_effect=[self.devices, {"runtime": [stopped]}]), \
+                patch.object(clr, "simulator_idle_blocker", return_value=None) as check, \
+                patch.object(clr, "shutdown_idle_simulator") as shutdown, \
+                patch.object(clr, "device_states", return_value={"test-device": "Shutdown"}), \
+                patch.object(clr, "du_bytes", return_value=1), \
+                patch.object(clr.subprocess, "run") as run:
+            self.assertEqual(clr.reset_idle_simulator("test-device", 30), 0)
+            shutdown.assert_called_once_with("test-device", 30)
+            self.assertEqual(check.call_count, 2)
+            self.assertEqual(run.call_args.args[0][2], "erase")
+
+    def test_failed_activity_or_state_recheck_never_erases(self):
+        for blocker, state in (("app running", "Shutdown"), (None, "Booted"), (None, None)):
+            with self.subTest(blocker=blocker, state=state), \
+                    patch.object(clr, "simctl_devices", return_value=self.devices), \
+                    patch.object(clr, "simulator_idle_blocker", return_value=blocker), \
+                    patch.object(clr, "device_states", return_value={"test-device": state}), \
+                    patch.object(clr, "du_bytes", return_value=1), \
+                    patch.object(clr.subprocess, "run") as run:
+                with self.assertRaises(RuntimeError):
+                    clr.reset_idle_simulator("test-device", 30)
+                run.assert_not_called()
+        for devices in ({}, {"runtime": [dict(self.device, isAvailable=False)]}):
+            with patch.object(clr, "simctl_devices", return_value=devices), \
+                    patch.object(clr.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "missing or runtime unavailable"):
+                    clr.reset_idle_simulator("test-device", 30)
+                run.assert_not_called()
+
+    def test_busy_after_shutdown_or_failed_shutdown_never_erases(self):
+        self.device["state"] = "Booted"
+        for shutdown_error in (None, RuntimeError("shutdown failed")):
+            with patch.object(clr, "simctl_devices", return_value=self.devices), \
+                    patch.object(clr, "simulator_idle_blocker", side_effect=[None, "new activity"]), \
+                    patch.object(clr, "shutdown_idle_simulator", side_effect=shutdown_error), \
+                    patch.object(clr.subprocess, "run") as run:
+                with self.assertRaises(RuntimeError):
+                    clr.reset_idle_simulator("test-device", 30)
+                run.assert_not_called()
+
+    def test_reset_covers_caches_and_wals_and_failure_does_not_clean_them(self):
+        simulator = self.entry()
+        simulator.reset_idle = True
+        cache = clr.Entry(self.data, "simulator_cache", None, self.now, udid="test-device", size_bytes=100)
+        wal = clr.Entry(self.data / "db-wal", "simulator_wal", None, self.now, udid="test-device", size_bytes=100)
+        entries = [cache, wal, simulator]
+        self.assertEqual(clr.total_size(entries), simulator.size_bytes)
+        for error in (None, RuntimeError("busy"), subprocess.CalledProcessError(1, "simctl")):
+            with patch.object(clr, "reset_idle_simulator", return_value=123, side_effect=error) as reset, \
+                    patch.object(clr, "clear_dir") as clear, \
+                    patch.object(clr, "checkpoint_wal") as checkpoint, \
+                    patch.object(clr.subprocess, "run") as run, \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(clr.delete_entries(entries, idle_minutes=30), 123 if error is None else 0)
+                reset.assert_called_once_with("test-device", 30)
+                clear.assert_not_called()
+                checkpoint.assert_not_called()
+                run.assert_not_called()
+        with patch.object(clr, "reset_idle_simulator") as reset, redirect_stderr(io.StringIO()):
+            self.assertEqual(clr.delete_entries([simulator]), 0)
+            reset.assert_not_called()
+
+    def test_reset_selection_deduplicates_cache_cleanup(self):
+        cache = clr.Entry(self.data, "simulator_cache", None, self.now, udid="test-device", size_bytes=100 * 1024 ** 2,
+                          state="Shutdown", last_accessed=self.now)
+        with patch.object(clr, "find_simulator_caches", return_value=[cache]):
+            _, delete, _ = self.run_main("--reset-idle", "--yes", caches=True)
+            selected, = delete.call_args.args
+            self.assertEqual([e.kind for e in selected], ["simulator"])
+            self.assertTrue(selected[0].reset_idle)
+        simulator = self.entry()
+        simulator.reset_idle = True
+        self.device["state"] = "Booted"
+        simulator.state = "Booted"
+        cache.state = "Booted"
+        data = json.loads(clr.render_json([simulator, cache], 2, 3, self.now))
+        self.assertEqual(data["after_shutdown_bytes"], simulator.size_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()

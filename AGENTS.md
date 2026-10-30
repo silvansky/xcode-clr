@@ -52,6 +52,12 @@ Deletion is `xcrun simctl delete <udid>` (NOT `rmtree` — keeps CoreSimulator's
 
 `--shutdown-idle --idle-minutes N` (default 30) offers shutdown plus cache/WAL cleanup for booted devices with listed cleanup candidates. `simulator_idle_blocker` checks simulator activity, app-container mtime/ctime, running UIKit/container apps, and host test/build runners; failures block shutdown. This is a conservative heuristic, not measured user idle time. `shutdown_idle_simulator` rechecks activity before shutdown and requires confirmed `Shutdown`. Selection stays explicit; `--json`/`--dry-run` never shut down. Booted items keep `reason=None` and `to_be_removed=false`; `shutdown_then_clean` represents the conditional action. `requires_shutdown` and `after_shutdown_bytes` expose the preview. Cache/WAL operations recheck state individually.
 
+## Large simulator reset
+
+Simulator entries over `SIM_RESET_MIN_BYTES` (2 GiB, strict `>`) warn in default output, independently of age and cache/WAL size. `--reset-idle` offers those available devices for reset after `simulator_idle_blocker(..., allow_shutdown=True)`; shut-down devices skip in-device process checks but still check host processes and app-container activity. Unknown/recent activity and failed checks block resets. The flag replaces deletion of available large devices, even when blocked. `reset_idle` marks eligible entries; keep `reason=None` and JSON `to_be_removed=false`, use `to_be_reset` and `action="reset"` instead. `--no-simulators` / config scan suppression also suppress resets.
+
+`reset_idle_simulator` reads fresh inventory and activity, shuts down booted devices through `shutdown_idle_simulator`, checks activity again after shutdown and confirms `Shutdown` before `xcrun simctl erase <udid>`. Never use rmtree for reset. Report measured allocation reduction; previews estimate savings. Selection is explicit through the usual prompt or `--yes` with `--reset-idle`. JSON/dry-run never reset. Cache/WAL entries for selected resets are omitted from the cleanup selection and skipped by `delete_entries`, even after a failed reset; totals count each device only once. Test reset commands only with mocks.
+
 ## Adding flags
 
 Append to `argparse` block in `main()`. Flags that suppress deletion (`--dry-run`, `--json`) must short-circuit before the prompt. `--json` includes **all** scanned items (not just stale) with `to_be_removed` flag — agents need full state.

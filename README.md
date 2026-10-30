@@ -26,7 +26,7 @@ An item is marked `to_be_removed` if **any** apply:
 - Caches inside a shut-down simulator → `purgeable` (always; entries under 50 MB are hidden). The device's state is re-checked right before clearing.
 - Finance WAL inside a shut-down simulator → `checkpoint`, regardless of age. Device state is re-checked before each checkpoint; locked databases report failure. WAL size is an upper estimate of savings because checkpointing can grow the database. WALs are never directly deleted.
 
-Simulators that are **currently booted** or were **never booted** (Xcode's default templates) are never removed, and their caches are never touched.
+Simulators that are **currently booted** or were **never booted** (Xcode's default templates) are excluded from normal device deletion. Booted devices need explicit idle shutdown before cleanup or reset; devices without a valid activity timestamp cannot be automatically reset.
 
 ## Usage
 
@@ -39,7 +39,7 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 | *(none)* | Print numbered table, then prompt: `a`ll, `n`one, or a selection like `1,3,5-7`. |
 | `--dry-run` | Print table, never delete. |
 | `--json` | Emit JSON to stdout (all scanned items, `to_be_removed` flag). No prompts, no delete. |
-| `--yes` / `-y` | Skip confirmation; clean everything marked (checkpoint WALs, delete other items). |
+| `--yes` / `-y` | Skip confirmation; clean everything eligible, including resets only with `--reset-idle`. |
 | `--days N` | Staleness threshold for DerivedData & worktree builds (default `2`). |
 | `--simulator-days N` | Staleness threshold for simulators (default `3`). |
 | `--worktree-root PATH` | Extra git worktree root to scan. Repeatable. |
@@ -48,7 +48,8 @@ xcode-clr [--dry-run] [--json] [--yes] [--days N] [--worktree-root PATH]
 | `--no-simulator-caches` | Skip purgeable caches inside shut-down simulators. |
 | `--no-simulator-wals` | Skip Finance database WAL checkpointing. |
 | `--shutdown-idle` | Include idle booted devices in the cleanup selection: shut down, then clear caches/checkpoint WALs. |
-| `--idle-minutes N` | Minimum app inactivity for `--shutdown-idle` (default `30`, positive integer). |
+| `--reset-idle` | Offer reset of idle simulators over 2 GB. Erases all installed apps, app data and settings; keeps the device. |
+| `--idle-minutes N` | Minimum app inactivity for `--shutdown-idle` and `--reset-idle` (default `30`, positive integer). |
 | `--all` | List every item found; cleanup still targets only eligible entries. |
 
 The default output includes a separate **Available after simulator shutdown** table with device names, cache/WAL sizes, and a total estimate. These entries are excluded from normal cleanup, including `--yes`. The existing 50 MB minimum applies to each cache/WAL entry.
@@ -60,6 +61,22 @@ This is a heuristic, not a record of user interaction. Unknown states, failed pr
 ```sh
 xcode-clr --shutdown-idle --idle-minutes 60 --dry-run
 xcode-clr --shutdown-idle --idle-minutes 60
+```
+
+## Large simulator resets
+
+The default output warns about every simulator **over 2 GB** (2 GiB, matching the CLI's size units), even when it is recent and has no purgeable caches. These devices can contain gigabytes of Siri/language models, wallpaper assets and diagnostic data that ordinary cache cleanup leaves alone.
+
+Use `--reset-idle` to include eligible large devices in the normal numbered selection. Reset runs `xcrun simctl erase <udid>`: it keeps the simulator device and its runtime, but **erases all installed apps, app data and settings**. System assets may download again after use. Sizes in the preview estimate savings; completed resets report measured allocation reduction.
+
+Both shut-down and booted devices must pass the same conservative inactivity, app-container and host process checks described above. Shut-down devices do not need the in-device process inventory. Available devices need a valid activity timestamp older than `--idle-minutes`; unknown states, missing data, unreadable containers, running apps/test runners and failed checks block reset. Booted devices shut down only after a fresh idle check, followed by another activity check and confirmed `Shutdown` before erasing.
+
+The reset flag replaces normal deletion for available large devices, including stale ones. A blocked reset does not fall back to device deletion. Cache/WAL operations for a selected reset are covered by that reset and skipped, including if it fails. Other eligible cleanup items remain selectable. `--no-simulators` / `scan_simulators: false` also disable reset candidates. Reset is never enabled by configuration or `--yes` alone.
+
+```sh
+xcode-clr --reset-idle --idle-minutes 60 --dry-run  # preview only
+xcode-clr --reset-idle --idle-minutes 60            # select devices to reset
+xcode-clr --reset-idle --idle-minutes 60 --json     # structured preview only
 ```
 
 ## Install
@@ -141,9 +158,11 @@ Precedence: CLI flags > env > config file > built-in defaults. `worktree_roots` 
 
 Cache/WAL items also include `requires_shutdown`, `shutdown_then_clean` (eligible with `--shutdown-idle`), and `idle_blocker` (why automatic shutdown was refused). Booted entries retain `to_be_removed: false`; `shutdown_then_clean` describes the conditional action separately. Top-level `after_shutdown_bytes` estimates cache/WAL space on devices requiring shutdown.
 
+Simulator items also expose `oversized`, `to_be_reset`, `requires_shutdown`, `idle_blocker`, and `action` (`"reset"`, `"delete"`, or `null`). Reset candidates keep `reason: null` and `to_be_removed: false`; `to_be_reset` describes their eligibility with `--reset-idle`, including in previews. Top-level `simulator_reset_threshold_bytes` is `2147483648`. With `--reset-idle`, `after_shutdown_bytes` also includes booted reset candidates, counting each device and its contents once.
+
 ## Tests
 
-`/usr/bin/python3 -m unittest -v` tests both Xcode timestamp schemas, staleness, previews, idle checks, and WAL/cache cleanup using temporary data and mocked simulator commands. No real simulators are modified.
+`/usr/bin/python3 -m unittest -v` tests both Xcode timestamp schemas, staleness, previews, idle checks, reset safeguards, and WAL/cache cleanup using temporary data and mocked simulator commands. No real simulators are modified.
 
 ## Examples
 
