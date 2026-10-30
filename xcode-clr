@@ -431,6 +431,7 @@ def simulator_idle_blocker(device: dict, minutes: int, now: datetime,
                 if not pid.isdigit():
                     continue
                 passive = label.startswith(("UIKitApplication:com.apple.Spotlight[",
+                                            "UIKitApplication:com.apple.SafariViewService[",
                                             "UIKitApplication:com.apple.chrono.WidgetRenderer-"))
                 if (label.startswith("UIKitApplication:") and not passive) or "xctest" in label.lower():
                     return f"app/test running: {label}"
@@ -879,8 +880,8 @@ def main() -> int:
     if blocked:
         print("Available after simulator shutdown (estimated):")
         print(render_table(blocked, now))
-        print(f"\nAfter shutdown: {human_size(total_size(blocked))}. "
-              "Use --shutdown-idle to offer shutdown and cleanup of idle devices.")
+        hint = "" if args.shutdown_idle else " Use --shutdown-idle to offer shutdown and cleanup of idle devices."
+        print(f"\nAfter shutdown: {human_size(total_size(blocked))}.{hint}")
         if args.shutdown_idle:
             for udid, blocker in blockers.items():
                 if blocker:

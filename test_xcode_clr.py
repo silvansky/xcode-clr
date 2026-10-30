@@ -196,6 +196,15 @@ class SimulatorWalTests(unittest.TestCase):
         self.assertIn("simulator_wal", output)
         self.assertIn("shutdown required", output)
         self.assertIn("Nothing to clean", output)
+        self.assertIn("Use --shutdown-idle", output)
+
+    def test_idle_preview_does_not_suggest_enabled_flag(self):
+        self.device["state"] = "Booted"
+        for blocker in (None, "app running"):
+            with self.subTest(blocker=blocker), patch.object(clr, "simulator_idle_blocker", return_value=blocker):
+                output = self.run_main("--shutdown-idle", "--dry-run")
+                self.assertIn("After shutdown:", output)
+                self.assertNotIn("Use --shutdown-idle", output)
 
     def make_cache(self):
         cache = self.data / "tmp"
@@ -292,6 +301,29 @@ class SimulatorWalTests(unittest.TestCase):
         jobs = "PID Status Label\n1 0 com.apple.financed\n2 0 UIKitApplication:com.apple.Spotlight[1]\n3 0 UIKitApplication:com.apple.chrono.WidgetRenderer-Default[1]\n"
         with patch.object(clr.subprocess, "run", side_effect=[Mock(stdout="/sbin/launchd\n"), Mock(stdout=jobs)]):
             self.assertIsNone(clr.simulator_idle_blocker(self.device, 30, future))
+
+    def test_safari_view_service_alone_does_not_block_idle_shutdown(self):
+        self.device["state"] = "Booted"
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        jobs = "PID Status Label\n123 0 UIKitApplication:com.apple.SafariViewService[865c][rb-legacy]\n"
+        with patch.object(clr.subprocess, "run", side_effect=[Mock(stdout="/sbin/launchd\n"), Mock(stdout=jobs)]):
+            self.assertIsNone(clr.simulator_idle_blocker(self.device, 30, future))
+
+    def test_safari_view_service_does_not_hide_apps_or_recent_activity(self):
+        self.device["state"] = "Booted"
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        jobs = "PID Status Label\n123 0 UIKitApplication:com.apple.SafariViewService[865c][rb-legacy]\n"
+        for label in ("UIKitApplication:com.apple.mobilecal[1]", "UIKitApplication:com.apple.mobilesafari[1]",
+                      "UIKitApplication:example.app[1]", "UIKitApplication:com.apple.SafariViewServiceExtra[1]",
+                      "com.apple.xctest"):
+            with self.subTest(label=label), patch.object(clr.subprocess, "run", side_effect=[
+                    Mock(stdout="/sbin/launchd\n"), Mock(stdout=jobs + f"456 0 {label}\n")]):
+                self.assertEqual(clr.simulator_idle_blocker(self.device, 30, future), f"app/test running: {label}")
+        app_data = self.data / "Containers/Data/Application/app/Documents"
+        app_data.mkdir(parents=True)
+        os.utime(app_data, (future.timestamp(), future.timestamp()))
+        with patch.object(clr.subprocess, "run", side_effect=[Mock(stdout="/sbin/launchd\n"), Mock(stdout=jobs)]):
+            self.assertIn("app-container activity", clr.simulator_idle_blocker(self.device, 30, future))
 
     def test_unreadable_app_container_blocks_idle_shutdown(self):
         self.device["state"] = "Booted"
